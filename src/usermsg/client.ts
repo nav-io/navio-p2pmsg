@@ -112,11 +112,18 @@ export interface MessagingClientOptions {
   /** Lifetime of reply keys we hand out. Default 7 d. */
   replyKeyTtlMs?: number;
   userAgent?: string;
+  /** Service bits to advertise. Default `NODE_P2PMSG_LEAF`. */
+  services?: bigint;
   now?: () => number;
 }
 
 export type MessagingEvents = {
   message: IncomingMessage;
+  /**
+   * A USER_DATA frame addressed to us whose body is not a library AuthFrame
+   * (e.g. sent by `naviod`'s `sendp2pmsg` RPC or another app). Unauthenticated.
+   */
+  raw: { topic: string; body: Uint8Array; scope: MessageScope };
   /** All chunks of an outgoing message were acked by the recipient. */
   ack: { msgId: Uint8Array; to: string };
   /** Outgoing message gave up (no ack before TTL). */
@@ -194,6 +201,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (o.dnsSeeds) poolOpts.dnsSeeds = o.dnsSeeds;
     if (o.transportFactory) poolOpts.transportFactory = o.transportFactory;
     if (o.userAgent) poolOpts.userAgent = o.userAgent;
+    if (o.services !== undefined) poolOpts.services = o.services;
     this.pool = o.pool ?? new PeerPool(poolOpts);
 
     this.grinder = new PowGrinder(o.powWorkers !== undefined ? { workers: o.powWorkers } : {});
@@ -494,12 +502,19 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private async onUserData(m: InboundMessage): Promise<void> {
     let topic: string;
     let frame: AuthFrame;
+    let outer;
     try {
-      const outer = parseUserMsgFrame(m.body);
-      topic = outer.topic;
+      outer = parseUserMsgFrame(m.body);
+    } catch {
+      return; // not a USER_DATA frame at all
+    }
+    topic = outer.topic;
+    try {
       frame = parseAuthFrame(outer.body);
     } catch {
-      return; // not a library frame; other apps may use kind 7 with their own framing
+      // Not a library frame: other senders (naviod RPC, other apps) use kind 7 with their own body framing.
+      if (m.recipient !== 'broadcast' || this.subscriptions.has(topic)) this.emit('raw', { topic, body: outer.body, scope: m.recipient });
+      return;
     }
     const scope: MessageScope = m.recipient;
     // Signatures bind the recipient: our identity for 1:1 traffic, zeros for

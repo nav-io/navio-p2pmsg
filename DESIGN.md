@@ -262,7 +262,7 @@ Lower layers exported for apps that want raw bus access:
   successor (node with only a leaf peer fluffs).
 - Doc paragraph in `doc/p2p-encrypted-messaging.md`.
 
-### PR B — `feat/p2p-websocket-listener`
+### PR B — `feat/p2p-websocket-listener` — https://github.com/nav-io/navio-core/pull/462
 
 - `-p2pwsbind=<addr:port>` (repeatable), default off. Listens with a
   `ListenSocket` flagged websocket.
@@ -293,4 +293,6 @@ to `build/bin/naviod`, used by the SDK's regtest tests
 - Wire format confirmed byte-exact against naviod: envelope, 98-byte PoW
   header with LE target, MsgHash, HKDF salt/info, zero nonce, kind AAD,
   padding ladder, generator broadcast key, augmented BLS signatures.
-- Pending: PR B (WebSocket listener) and the browser path on top of it.
+- PR B (#462) built into the integration worktree: a `ws://` MessagingClient
+  exchanges acked messages with a TCP client through the node (13 int tests).
+- Pending: merge #423/#461/#462; browser bundle smoke test; npm publish.

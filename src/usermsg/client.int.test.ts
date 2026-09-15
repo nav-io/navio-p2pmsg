@@ -5,7 +5,7 @@
  */
 import { existsSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DEFAULT_NAVIOD, type RegtestNode, startRegtestNode } from '../../test/regtest-node.js';
+import { DEFAULT_NAVIOD, type RegtestNode, getFreePort, startRegtestNode, supportedFlags } from '../../test/regtest-node.js';
 import { MessagingClient, type MessagingEvents } from './client.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { fromHex, fromUtf8, toHex, utf8 } from '../common/bytes.js';
@@ -25,14 +25,15 @@ function waitFor<K extends keyof MessagingEvents>(c: MessagingClient, ev: K, pre
 describe.skipIf(!haveBinary)('MessagingClient <-> naviod regtest', () => {
   let node: RegtestNode;
   let leafSupported = false;
+  let wsPort = 0;
   const clients: MessagingClient[] = [];
 
-  async function mk(seedByte: number) {
+  async function mk(seedByte: number, transport: 'tcp' | 'ws' = 'tcp') {
     const c = await MessagingClient.create({
       network: 'regtest',
       seed: new Uint8Array(32).fill(seedByte),
       store: new MemoryStore(),
-      peers: [`127.0.0.1:${node.port}`],
+      peers: [transport === 'ws' ? `ws://127.0.0.1:${wsPort}` : `127.0.0.1:${node.port}`],
       targetPeers: 1,
       dnsSeeds: [],
       powBits: 8,
@@ -51,7 +52,11 @@ describe.skipIf(!haveBinary)('MessagingClient <-> naviod regtest', () => {
   }
 
   beforeAll(async () => {
-    node = await startRegtestNode({ extraArgs: ['-p2pmsg=1', '-p2pmsgpowbits=8', '-debug=net'] });
+    const wsSupported = supportedFlags(DEFAULT_NAVIOD).has('-p2pwsbind');
+    if (wsSupported) wsPort = await getFreePort();
+    node = await startRegtestNode({
+      extraArgs: ['-p2pmsg=1', '-p2pmsgpowbits=8', '-debug=net', ...(wsSupported ? [`-p2pwsbind=127.0.0.1:${wsPort}`] : [])],
+    });
     const help = await node.rpc<string>('help', ['getp2pmsginfo']);
     leafSupported = /leaf_peers/.test(help);
   });
@@ -88,6 +93,23 @@ describe.skipIf(!haveBinary)('MessagingClient <-> naviod regtest', () => {
     const got = waitFor(dave, 'message');
     await carol.send(dave.identity, utf8('who are you'));
     expect(fromUtf8((await got).payload)).toBe('who are you');
+  }, 120000);
+
+  it('WebSocket client talks to a TCP client through the node', async ({ skip }) => {
+    if (!wsPort) skip();
+    const frank = await mk(26, 'ws');
+    const grace = await mk(27, 'tcp');
+    const peers = await node.rpc<Array<{ websocket?: boolean; subver: string }>>('getpeerinfo');
+    expect(peers.filter((p) => p.websocket).length).toBe(1);
+    await frank.addContact(grace.bundle());
+    const got = waitFor(grace, 'message');
+    const acked = waitFor(frank, 'ack');
+    await frank.send(grace.identity, utf8('hello from the browser side'));
+    expect(fromUtf8((await got).payload)).toBe('hello from the browser side');
+    await acked;
+    const back = waitFor(frank, 'message');
+    await grace.send(frank.identity, utf8('hello ws'));
+    expect(fromUtf8((await back).payload)).toBe('hello ws');
   }, 120000);
 
   it('SDK -> naviod inbox shows up in listp2pmsgs; naviod -> SDK arrives as raw', async () => {

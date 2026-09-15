@@ -1,0 +1,193 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { MessagingClient, type MessagingEvents, type PeerNetwork } from './client.js';
+import { MemoryStore } from '../stores/memory-store.js';
+import { Emitter } from '../net/emitter.js';
+import { utf8, fromUtf8 } from '../common/bytes.js';
+
+type NetEvents = {
+  message: { peerId: string; stem: boolean; payload: Uint8Array };
+  peer: { id: string; address: string };
+  peerclose: { id: string; address: string };
+  error: Error;
+};
+
+/** In-memory "network": every broadcast is delivered to every other member, like a relaying node would. */
+class Hub {
+  members: FakeNetwork[] = [];
+  relay(from: FakeNetwork, envelope: Uint8Array, stem: boolean): number {
+    let n = 0;
+    for (const m of this.members) {
+      if (m === from || !m.up) continue;
+      n++;
+      setTimeout(() => m.emit('message', { peerId: 'hub', stem, payload: envelope }), 1);
+    }
+    return n;
+  }
+}
+
+class FakeNetwork extends Emitter<NetEvents> implements PeerNetwork {
+  up = false;
+  constructor(private hub: Hub) {
+    super();
+    hub.members.push(this);
+  }
+  async start(): Promise<void> {
+    this.up = true;
+    this.emit('peer', { id: 'hub', address: 'hub' });
+  }
+  stop(): void {
+    this.up = false;
+  }
+  broadcast(envelope: Uint8Array, opts: { stem: boolean }): number {
+    return this.hub.relay(this, envelope, opts.stem);
+  }
+  medianClockOffset(): number {
+    return 0;
+  }
+  get connectedCount(): number {
+    return this.up ? 1 : 0;
+  }
+}
+
+const clients: MessagingClient[] = [];
+afterEach(() => {
+  for (const c of clients.splice(0)) c.close();
+});
+
+async function mk(hub: Hub, seedByte: number, extra: Partial<Parameters<typeof MessagingClient.create>[0]> = {}) {
+  const c = await MessagingClient.create({
+    network: 'regtest',
+    seed: new Uint8Array(32).fill(seedByte),
+    store: new MemoryStore(),
+    pool: new FakeNetwork(hub),
+    powBits: 4,
+    powWorkers: 0,
+    ackDelayMs: 50,
+    retryTickMs: 200,
+    discoveryTimeoutMs: 5000,
+    ...extra,
+  });
+  clients.push(c);
+  await c.connect();
+  return c;
+}
+
+function waitFor<K extends keyof MessagingEvents>(
+  client: MessagingClient,
+  event: K,
+  pred: (v: MessagingEvents[K]) => boolean = () => true,
+  ms = 10000,
+): Promise<MessagingEvents[K]> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      off();
+      reject(new Error(`timeout waiting for ${String(event)}`));
+    }, ms);
+    const off = client.on(event, (v) => {
+      if (pred(v)) {
+        clearTimeout(t);
+        off();
+        resolve(v);
+      }
+    });
+  });
+}
+
+describe('MessagingClient end to end (in-memory hub)', () => {
+  it('sends with a known bundle, receives, acks, and ratchets reply keys', async () => {
+    const hub = new Hub();
+    const alice = await mk(hub, 1);
+    const bob = await mk(hub, 2);
+    await alice.addContact(bob.bundle());
+
+    const gotBob = waitFor(bob, 'message');
+    const acked = waitFor(alice, 'ack');
+    const id = await alice.send(bob.identity, utf8('hello bob'));
+    const m = await gotBob;
+    expect(fromUtf8(m.payload)).toBe('hello bob');
+    expect(m.from).toBe(alice.identity);
+    expect(m.scope).toBe('inbox');
+    expect(m.topic).toBe('msg');
+    const a = await acked;
+    expect(a.msgId).toEqual(id);
+    expect(alice.outbox.size).toBe(0);
+
+    // Bob learned alice's reply key from her frame; alice learned bob's from the ack.
+    expect(bob.contacts.get(alice.identityBytes)?.nextKey).toBeDefined();
+    expect(alice.contacts.get(bob.identityBytes)?.nextKey).toBeDefined();
+
+    // Reply from bob rides alice's session key (scope 'session'), no bundle needed on bob's side
+    // because alice's ack carried her reply key AND bob has no bundle for alice → discovery would
+    // be needed only for the prekey fallback. Here nextKey exists so no discovery happens.
+    const gotAlice = waitFor(alice, 'message');
+    await bob.send(alice.identity, utf8('hi alice'));
+    const r = await gotAlice;
+    expect(fromUtf8(r.payload)).toBe('hi alice');
+    expect(r.scope).toBe('session');
+  });
+
+  it('discovers a prekey over the bus when only the identity is known', async () => {
+    const hub = new Hub();
+    const alice = await mk(hub, 3);
+    const bob = await mk(hub, 4);
+    const learned = waitFor(alice, 'contact', (c) => c.identity === bob.identity);
+    const got = waitFor(bob, 'message');
+    await alice.send(bob.identity, utf8('found you'));
+    await learned;
+    expect(fromUtf8((await got).payload)).toBe('found you');
+  }, 20000);
+
+  it('chunks large payloads and retries until acked', async () => {
+    const hub = new Hub();
+    const alice = await mk(hub, 5);
+    const bob = await mk(hub, 6);
+    await alice.addContact(bob.bundle());
+    const big = new Uint8Array(9000).map((_, i) => i % 251);
+    const got = waitFor(bob, 'message');
+    const acked = waitFor(alice, 'ack');
+    await alice.send(bob.identity, big);
+    expect((await got).payload).toEqual(big);
+    await acked;
+  }, 30000);
+
+  it('retries when the recipient was offline and expires after ttl', async () => {
+    const hub = new Hub();
+    const alice = await mk(hub, 7);
+    const bob = await mk(hub, 8);
+    await alice.addContact(bob.bundle());
+    bob.pool.stop(); // bob offline
+    const id = await alice.send(bob.identity, utf8('are you there'), { ttlMs: 1500 });
+    expect(alice.outbox.get(id)).toBeDefined();
+    const expired = await waitFor(alice, 'expired', (e) => e.msgId.every((b, i) => b === id[i]), 10000);
+    expect(expired.msgId).toEqual(id);
+    expect(alice.outbox.size).toBe(0);
+  }, 20000);
+
+  it('public topics reach subscribers only', async () => {
+    const hub = new Hub();
+    const alice = await mk(hub, 9);
+    const bob = await mk(hub, 10);
+    const carol = await mk(hub, 11);
+    const bobGot: string[] = [];
+    bob.subscribe('news', (m) => bobGot.push(fromUtf8(m.payload)));
+    let carolGot = 0;
+    carol.on('message', () => carolGot++);
+    await alice.publish('news', utf8('extra extra'));
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bobGot).toEqual(['extra extra']);
+    expect(carolGot).toBe(0);
+  });
+
+  it('rejects reserved topics and unsigned senders cannot be acked', async () => {
+    const hub = new Hub();
+    const alice = await mk(hub, 12);
+    const bob = await mk(hub, 13);
+    await alice.addContact(bob.bundle());
+    await expect(alice.send(bob.identity, utf8('x'), { topic: '_p2pmsg/ack' })).rejects.toThrow(/reserved/);
+    const got = waitFor(bob, 'message');
+    await alice.send(bob.identity, utf8('anon'), { sign: false });
+    const m = await got;
+    expect(m.from).toBeUndefined();
+    expect(alice.outbox.size).toBe(0);
+  });
+});

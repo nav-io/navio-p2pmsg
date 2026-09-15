@@ -157,7 +157,8 @@ transport is `Uint8Array` only, no `Buffer`.
 `Peer` wraps a transport: Bitcoin message codec (24-byte header: magic, 12-byte
 command, u32 length, 4-byte checksum = first 4 bytes of double-SHA256),
 `version`/`verack` handshake, `ping`/`pong`, `sendaddrv2`/`addrv2` and `addr`
-parsing, `getaddr`. Ignores everything else. Advertises `NODE_P2PMSG_LEAF`,
+parsing, `getaddr`. Note `sendaddrv2` must go out between `version` and
+`verack` (the node disconnects peers that send it later); `getaddr` after. Ignores everything else. Advertises `NODE_P2PMSG_LEAF`,
 `relay = false`, `start_height = 0`. Records peer's `version.timestamp` for
 clock offset.
 
@@ -250,7 +251,7 @@ Lower layers exported for apps that want raw bus access:
 
 ## C++ work (nav-io/navio-core, base master)
 
-### PR A — `feat/p2pmsg-leaf-bit`
+### PR A — `feat/p2pmsg-leaf-bit` — https://github.com/nav-io/navio-core/pull/461
 
 - `protocol.h`: `NODE_P2PMSG_LEAF = (1 << 25)`; `protocol.cpp` name `P2PMSG_LEAF`.
 - `init.cpp` forward(): split `eligible` into `fluff_eligible` (P2PMSG or LEAF)
@@ -282,3 +283,14 @@ Lower layers exported for apps that want raw bus access:
 Integration worktree: `/Users/alex/dev/navio-p2pmsg-int` = #423 + A + B, built
 to `build/bin/naviod`, used by the SDK's regtest tests
 (`-regtest -p2pmsg=1 -p2pmsgpowbits=8 -p2pwsbind=127.0.0.1:<port>`).
+
+## Status (2026-09-16)
+
+- SDK: all layers implemented. 149 unit tests; 12 regtest integration tests
+  (handshake, bus interop both directions, two-client messaging with acks,
+  discovery, naviod `sendp2pmsg`/`listp2pmsgs` interop) pass against
+  `navio-p2pmsg-int` = #423 + #461.
+- Wire format confirmed byte-exact against naviod: envelope, 98-byte PoW
+  header with LE target, MsgHash, HKDF salt/info, zero nonce, kind AAD,
+  padding ladder, generator broadcast key, augmented BLS signatures.
+- Pending: PR B (WebSocket listener) and the browser path on top of it.

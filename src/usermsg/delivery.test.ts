@@ -91,7 +91,8 @@ describe('outbox', () => {
     await ob.add({ msgId: new Uint8Array(16).fill(4), recipient: new Uint8Array(48), topic: 'msg', chunks: [new Uint8Array(1)] });
     now += 20_000;
     d = await ob.due();
-    expect(d.expired.length).toBe(1);
-    expect(d.due.length).toBe(0); // the stale id=3 entry in ob was removed by ob2 in store but still in ob memory; it's expired too
+    // id=4 expired, and the id=3 entry still cached in `ob` (ob2 removed it from the store) expired too
+    expect(d.expired.length).toBe(2);
+    expect(d.due.length).toBe(0);
   });
 });

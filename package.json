@@ -1,0 +1,42 @@
+{
+  "name": "navio-p2pmsg",
+  "version": "0.1.0",
+  "description": "Standalone TypeScript SDK for the Navio p2pmsg encrypted broadcast bus (no full node, no Electrum)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }, "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" } },
+    "./net": { "import": { "types": "./dist/net/index.d.ts", "default": "./dist/net/index.js" }, "require": { "types": "./dist/net/index.d.cts", "default": "./dist/net/index.cjs" } },
+    "./bus": { "import": { "types": "./dist/bus/index.d.ts", "default": "./dist/bus/index.js" }, "require": { "types": "./dist/bus/index.d.cts", "default": "./dist/bus/index.cjs" } },
+    "./usermsg": { "import": { "types": "./dist/usermsg/index.d.ts", "default": "./dist/usermsg/index.js" }, "require": { "types": "./dist/usermsg/index.d.cts", "default": "./dist/usermsg/index.cjs" } },
+    "./stores": { "import": { "types": "./dist/stores/index.d.ts", "default": "./dist/stores/index.js" }, "require": { "types": "./dist/stores/index.d.cts", "default": "./dist/stores/index.cjs" } }
+  },
+  "files": ["dist"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude '**/*.int.test.ts'",
+    "test:int": "vitest run src/**/*.int.test.ts",
+    "test:all": "vitest run"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1.2.1",
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1",
+    "@scure/base": "^1.2.4"
+  },
+  "optionalDependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  }
+}

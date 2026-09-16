@@ -109,6 +109,19 @@ export function defaultTransportFactory(address: string, network: NetworkName): 
 }
 
 /** Normalise an address string to its address-book key. */
+const V6_DEPRIORITISE_MS = 10 * 60 * 1000;
+
+/** `[v6]:port` book addresses and ws URLs with a bracketed v6 host. */
+export function isIPv6Address(address: string): boolean {
+  return address.startsWith('[') || /^wss?:\/\/\[/.test(address);
+}
+
+/** Errors that mean "this host cannot reach that address family at all". */
+export function isNoRouteError(err: Error): boolean {
+  const code = (err as NodeJS.ErrnoException).code ?? '';
+  return code === 'EHOSTUNREACH' || code === 'ENETUNREACH' || code === 'EADDRNOTAVAIL' || /EHOSTUNREACH|ENETUNREACH|EADDRNOTAVAIL/.test(err.message);
+}
+
 export function normalizeAddress(address: string, network: NetworkName): string {
   const a = parsePeerAddress(address, DefaultPorts[network]);
   if (a.kind === 'ws') return a.url!;
@@ -141,6 +154,12 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
   private readonly dialing = new Set<string>();
   private running = false;
   private maintainTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * When an IPv6 dial fails with a "no route" error the host most likely has
+   * no IPv6 connectivity; until this time IPv6 candidates are tried only
+   * after every IPv4 candidate. Cleared by any successful IPv6 connection.
+   */
+  private v6DeprioritisedUntil = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private dnsInFlight = false;
   private dnsResolvedAt = 0;
@@ -329,7 +348,12 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       const j = Math.floor(this.opts.random() * (i + 1));
       [candidates[i], candidates[j]] = [candidates[j]!, candidates[i]!];
     }
-    for (const c of candidates.slice(0, want)) this.dial(c);
+    // No IPv6 route observed recently: stable-partition IPv4 first.
+    const ordered =
+      this.v6DeprioritisedUntil > now
+        ? [...candidates.filter((c) => !isIPv6Address(c.address)), ...candidates.filter((c) => isIPv6Address(c.address))]
+        : candidates;
+    for (const c of ordered.slice(0, want)) this.dial(c);
 
     if (candidates.length < want) {
       this.maybeResolveDns();
@@ -392,6 +416,9 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
         else e.failures++;
         e.nextTryAt = this.opts.now() + this.backoff(e.failures);
       }
+      if (!wasConnected && err && isIPv6Address(address) && isNoRouteError(err)) {
+        this.v6DeprioritisedUntil = this.opts.now() + V6_DEPRIORITISE_MS;
+      }
       if (this.running) {
         this.emit('peerclose', { peerId: id, address, error: err, wasConnected });
         this.maintain();
@@ -405,6 +432,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
         if (!this.running || peer.closed) return;
         slot.connected = true;
         entry.failures = 0;
+        if (isIPv6Address(address)) this.v6DeprioritisedUntil = 0;
         entry.lastSeen = this.opts.now();
         entry.services |= peer.peerVersion!.services;
         this.emit('peer', this.info(slot));

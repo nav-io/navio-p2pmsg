@@ -195,3 +195,29 @@ describe('parsePeerAddress', () => {
     expect(() => parsePeerAddress('', 9)).toThrow();
   });
 });
+
+describe('IPv6 deprioritisation', () => {
+  it('dials IPv4 first after an IPv6 no-route failure', async () => {
+    const dials: string[] = [];
+    const factory = (address: string): MockTransport => {
+      dials.push(address);
+      const v6 = address.startsWith('[');
+      const err = Object.assign(new Error(`connect EHOSTUNREACH ${address}`), { code: 'EHOSTUNREACH' });
+      const [client, server] = MockTransport.pair(address, `node@${address}`, v6 ? { failConnect: err } : {});
+      if (!v6) new MockNode(server, { network: 'regtest' });
+      return client;
+    };
+    // Book: 6 IPv6 seeds + 1 IPv4, target 1. random() = 0 makes the shuffle deterministic
+    // (identity), so IPv6 addresses come first in book order.
+    const seeds = ['[2001:db8::1]:1', '[2001:db8::2]:1', '[2001:db8::3]:1', '[2001:db8::4]:1', '[2001:db8::5]:1', '[2001:db8::6]:1', '9.9.9.9:1'];
+    const pool = new PeerPool({ network: 'regtest', seeds, targetPeers: 1, transportFactory: factory, dnsSeeds: [], allowDns: false, random: () => 0, minBackoffMs: 5, maxBackoffMs: 10 });
+    const connected = new Promise<void>((r) => pool.on('peer', () => r()));
+    await pool.start();
+    await connected;
+    pool.stop();
+    // First dial is IPv6 (fails with no route); after that IPv4 must be preferred immediately.
+    expect(dials[0]!.startsWith('[')).toBe(true);
+    expect(dials.filter((d) => d.startsWith('[')).length).toBe(1);
+    expect(dials[1]).toBe('9.9.9.9:1');
+  });
+});

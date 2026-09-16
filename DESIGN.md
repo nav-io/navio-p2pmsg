@@ -295,4 +295,10 @@ to `build/bin/naviod`, used by the SDK's regtest tests
   padding ladder, generator broadcast key, augmented BLS signatures.
 - PR B (#462) built into the integration worktree: a `ws://` MessagingClient
   exchanges acked messages with a TCP client through the node (13 int tests).
-- Pending: merge #423/#461/#462; browser bundle smoke test; npm publish.
+- Browser verified in Chrome (`browser-test/`): esbuild bundle, `ws://` to
+  naviod, PoW in two Web Workers, IndexedDB persistence across reload,
+  discovery + acked round trip with a Node client. Found and fixed a reply-key
+  revocation race (older reply keys now stay valid; seen-set persisted).
+- Mainnet: handshake + addr gossip verified against production nodes
+  (`/Navio:v0.2.0/`); messaging needs #423/#461/#462 deployed.
+- Pending: merge #423/#461/#462; npm publish.

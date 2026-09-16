@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .DS_Store
+browser-test/out/
+browser-test/harness.log
+browser-test/screenshot.png

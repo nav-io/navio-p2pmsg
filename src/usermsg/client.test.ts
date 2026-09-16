@@ -100,6 +100,9 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     const bob = await mk(hub, 2);
     await alice.addContact(bob.bundle());
 
+    const retries: number[] = [];
+    bob.on('sent', (s) => { if (s.attempt > 1) retries.push(s.attempt); });
+    alice.on('sent', (s) => { if (s.attempt > 1) retries.push(s.attempt); });
     const gotBob = waitFor(bob, 'message');
     const acked = waitFor(alice, 'ack');
     const id = await alice.send(bob.identity, utf8('hello bob'));
@@ -124,6 +127,9 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     const r = await gotAlice;
     expect(fromUtf8(r.payload)).toBe('hi alice');
     expect(r.scope).toBe('session');
+    await waitFor(bob, 'ack');
+    // Acks must reach the sender on the first try: no retransmissions anywhere.
+    expect(retries).toEqual([]);
   });
 
   it('discovers a prekey over the bus when only the identity is known', async () => {

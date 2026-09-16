@@ -88,3 +88,11 @@ Example: `npx tsx examples/chat-cli.ts --network regtest --peer 127.0.0.1:18444`
 ## License
 
 MIT
+
+## Browser smoke test
+
+```bash
+node browser-test/build.mjs          # esbuild bundle + PoW worker into browser-test/out
+npx tsx browser-test/harness.ts      # regtest naviod with -p2pwsbind, a Node echo client, static server
+# open the printed URL in a browser, then in the console: send('<BOB navid1…>', 'hi')
+```

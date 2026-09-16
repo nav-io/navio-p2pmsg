@@ -145,6 +145,8 @@ interface PendingAck {
 }
 
 const SEEN_CAPACITY = 16384;
+const REPLY_KEYS_PER_CONTACT = 4;
+const NS_SEEN = 'seen';
 
 export class MessagingClient extends Emitter<MessagingEvents> {
   readonly network: NetworkName;
@@ -165,7 +167,8 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private readonly subscriptions = new Map<string, Set<(m: IncomingMessage) => void>>();
   private readonly pendingAcks = new Map<string, PendingAck>();
   private readonly discoveries = new Map<string, { sessionPub: Uint8Array; resolve: (b: Bundle) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  private readonly replyKeys = new Map<string, Uint8Array>(); // contact hex -> our live reply pub for them
+  /** Our live reply keys per contact, newest last. Older ones stay valid until pushed out or expired. */
+  private readonly replyKeys = new Map<string, Uint8Array[]>();
   private readonly seen = new Map<string, true>();
   private readonly inflight = new Set<string>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -234,7 +237,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     await contacts.load();
     const outbox = new Outbox(store, { now, ttlMs: o.messageTtlMs });
     await outbox.load();
-    return new MessagingClient(o, store, keyring, contacts, outbox);
+    const client = new MessagingClient(o, store, keyring, contacts, outbox);
+    await client.loadSeen();
+    return client;
   }
 
   // ---------------------------------------------------------------- identity
@@ -283,7 +288,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
 
   /** Snapshot of keys/contacts/outbox for apps that persist state themselves. */
   exportState(): Promise<StoreSnapshot> {
-    return snapshotStore(this.store, ['keys', 'contacts', 'outbox']);
+    return snapshotStore(this.store, ['keys', 'contacts', 'outbox', NS_SEEN]);
   }
   static importState(store: Store, snap: StoreSnapshot): Promise<void> {
     return restoreStore(store, snap);
@@ -423,15 +428,21 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     return bundle.prekey;
   }
 
-  /** Our live reply key for a contact: minted per transmit, replaces the previous one. */
+  /**
+   * Mint a fresh reply key for a contact. The previous few stay registered:
+   * a message or ack encrypted to an older key may still be in flight (an ack
+   * flush and a transmit to the same contact can interleave), and revoking it
+   * immediately would silently drop that traffic and force a retry to the prekey.
+   */
   private mintReplyKey(identity: Uint8Array): Uint8Array {
     const key = toHex(identity);
-    const old = this.replyKeys.get(key);
-    if (old) this.keys.removeSessionKey(old);
     const sk = generateSecret();
     const pub = publicKey(sk);
     this.keys.addSessionKey(sk, pub, this.opts.replyKeyTtlMs);
-    this.replyKeys.set(key, pub);
+    const list = this.replyKeys.get(key) ?? [];
+    list.push(pub);
+    while (list.length > REPLY_KEYS_PER_CONTACT) this.keys.removeSessionKey(list.shift()!);
+    this.replyKeys.set(key, list);
     return pub;
   }
 
@@ -568,12 +579,25 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     this.emit('message', msg);
   }
 
+  /**
+   * Remember a delivered (msgId, sender, chunk) so a re-send whose ack was lost
+   * is re-acked but not re-delivered. Persisted so a restart does not surface
+   * duplicates to the application.
+   */
   private remember(key: string): void {
+    if (this.seen.has(key)) return;
     this.seen.set(key, true);
-    if (this.seen.size > SEEN_CAPACITY) {
+    void this.store.put(NS_SEEN, key, new Uint8Array(0)).catch(() => {});
+    while (this.seen.size > SEEN_CAPACITY) {
       const first = this.seen.keys().next().value;
-      if (first !== undefined) this.seen.delete(first);
+      if (first === undefined) break;
+      this.seen.delete(first);
+      void this.store.delete(NS_SEEN, first).catch(() => {});
     }
+  }
+
+  private async loadSeen(): Promise<void> {
+    for (const { key } of await this.store.list(NS_SEEN)) this.seen.set(key, true);
   }
 
   private async onPrekeyRequest(topic: string, frame: AuthFrame, scope: MessageScope): Promise<void> {

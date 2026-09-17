@@ -7,6 +7,8 @@ identity, addressing, end-to-end encryption, reliable 1:1 delivery and public
 pub/sub on top of the bus. A chat app is one consumer; the library is not the
 chat app.
 
+Requires Navio nodes running nav-io/navio-core PRs #423 (user messaging), #461 (`NODE_P2PMSG_LEAF`) and, for browsers, #462 (`-p2pwsbind`). Until those are deployed on mainnet, use regtest/testnet nodes built from those branches.
+
 See `DESIGN.md` for the wire spec, the layer design and the C++ prerequisites
 (`NODE_P2PMSG_LEAF` service bit, `-p2pwsbind` WebSocket listener).
 

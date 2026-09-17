@@ -70,7 +70,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude '**/*.int.test.ts'",
     "test:int": "vitest run src/**/*.int.test.ts",
-    "test:all": "vitest run"
+    "test:all": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",
@@ -88,5 +89,26 @@
     "tsx": "^4.23.13",
     "typescript": "^5.7.2",
     "vitest": "^3.0.5"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nav-io/navio-p2pmsg.git"
+  },
+  "homepage": "https://github.com/nav-io/navio-p2pmsg#readme",
+  "bugs": {
+    "url": "https://github.com/nav-io/navio-p2pmsg/issues"
+  },
+  "keywords": [
+    "navio",
+    "p2pmsg",
+    "messaging",
+    "p2p",
+    "bls",
+    "ecies",
+    "encrypted",
+    "dandelion",
+    "websocket"
+  ],
+  "author": "alex v. <alex@nav.community>",
+  "sideEffects": false
 }

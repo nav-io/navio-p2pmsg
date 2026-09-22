@@ -41,12 +41,36 @@ import {
   BUNDLE_BYTES,
 } from './bundle.js';
 import { extractDetectionKey, fmdFlag, isValidClueKey, parseClueKey } from '../bus/fmd.js';
-import { isListedDevice, parseDeviceList, verifyDeviceList } from '../devices/list.js';
+import {
+  DEVICE_LIST_VERSION,
+  type DeviceEntry,
+  isListedDevice,
+  parseDeviceList,
+  serializeDeviceList,
+  signDeviceList,
+  verifyDeviceList,
+} from '../devices/list.js';
+import { type DeviceIdentity, deviceId, generateDevice, signDeviceCert, verifyDeviceCert } from '../devices/hierarchy.js';
+import {
+  decodePairingOffer,
+  encodePairingOffer,
+  PAIRING_TTL_MS,
+  PAIRING_VERSION,
+  type PairingOffer,
+  pairingTopic,
+  parseAnnounce,
+  parseGrant,
+  sasForDevice,
+  sasForPrimary,
+  serializeAnnounce,
+  serializeGrant,
+} from '../devices/pairing.js';
 import { ArchiveClient, type SyncResult } from '../archive/client.js';
 import {
   ACK_WHOLE,
   TOPIC_ACK,
   TOPIC_DEFAULT,
+  TOPIC_PAIR,
   TOPIC_PREKEY_RESPONSE,
   isReservedTopic,
   parseAcks,
@@ -183,6 +207,15 @@ export type MessagingEvents = {
   expired: { msgId: Uint8Array; to: string };
   /** An attempt to broadcast a message/chunk went out (`peers` = how many peers it was sent to). */
   sent: { msgId: Uint8Array; chunk: number; attempt: number; peers: number };
+  /**
+   * A device is asking to be paired with this account. `sas` is the string the
+   * user must compare against the one shown on the new device — it is the only
+   * thing authenticating the exchange, so nothing should be granted until a
+   * human confirms it matches.
+   */
+  pairingRequest: { sas: string; devicePub: Uint8Array; label: string };
+  /** This device was granted membership of an account. */
+  paired: { accountEpoch: number; accountSecret: Uint8Array; identityPub: Uint8Array; cert: Uint8Array; caps: number; deviceList: Uint8Array };
   /** A verified prekey bundle was learned for a contact. */
   contact: { identity: string; bundle: string };
   peer: { id: string; address: string };
@@ -217,6 +250,12 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    * the shared key rather than our identity, and are never acked.
    */
   private readonly sharedKeys = new Set<string>();
+  /** Outstanding pairing offers we made, keyed by their topic. */
+  private readonly pairingOffers = new Map<string, { pairSk: Uint8Array; pairPub: Uint8Array; salt: Uint8Array; expiresAt: number }>();
+  /** Devices that announced themselves and are awaiting the user's confirmation. */
+  private readonly pairingRequests = new Map<string, { devicePub: Uint8Array; label: string; replyPub: Uint8Array }>();
+  /** Set on the device being added, between requestPairing and the grant. */
+  private pendingPairing: { device: DeviceIdentity; replyPub: Uint8Array; offer: PairingOffer } | undefined;
   readonly keyring: Keyring;
   /** Set when this client runs as a secondary device. */
   private readonly device: MessagingClientOptions['device'];
@@ -727,6 +766,174 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     }
   }
 
+
+  // -------------------------------------------------------------------- pairing
+
+  /**
+   * Begin admitting another device. Returns the `navpair1…` string to show as
+   * a QR.
+   *
+   * The offer is a bearer secret and single-use: anyone who photographs it can
+   * reach the next step. What stops them is the short authentication string —
+   * see `pairingRequest`.
+   */
+  startPairing(): { offer: string; expiresAt: number } {
+    if (!this.keyring.isPrimary) throw new Error('only the primary device can admit other devices');
+    const pairSk = generateSecret();
+    const pairPub = publicKey(pairSk);
+    const salt = randomBytes(16);
+    const expiresAt = this.now() + PAIRING_TTL_MS;
+    // Register the pairing key so the announce, which is addressed to it,
+    // decrypts; it expires with the offer.
+    this.keys.addSessionKey(pairSk, pairPub, PAIRING_TTL_MS);
+    this.pairingOffers.set(pairingTopic(pairPub), { pairSk, pairPub, salt, expiresAt });
+    return {
+      offer: encodePairingOffer({ version: PAIRING_VERSION, network: this.network, pairPub, salt }),
+      expiresAt,
+    };
+  }
+
+  /** Abandon any outstanding pairing offer. */
+  cancelPairing(): void {
+    for (const [, o] of this.pairingOffers) this.keys.removeSessionKey(o.pairPub);
+    this.pairingOffers.clear();
+    this.pairingRequests.clear();
+  }
+
+  /**
+   * Answer someone else's offer, as the device being added.
+   *
+   * Returns the short authentication string to display. The account grants
+   * nothing until the user confirms it matches the primary's.
+   */
+  async requestPairing(offerText: string, label: string): Promise<{ sas: string; device: DeviceIdentity }> {
+    const offer = decodePairingOffer(offerText);
+    if (offer.network !== this.network) throw new Error(`offer is for ${offer.network}, not ${this.network}`);
+    const device = generateDevice();
+    // Mint a reply key so the grant comes back to us and to nobody else.
+    const replySk = generateSecret();
+    const replyPub = publicKey(replySk);
+    this.keys.addSessionKey(replySk, replyPub, PAIRING_TTL_MS);
+    this.pendingPairing = { device, replyPub, offer };
+
+    const topic = pairingTopic(offer.pairPub);
+    // Unsigned: this device has no identity yet, and the offer key is what
+    // authorises it to speak here at all.
+    const inner = serializeAuthFrame({
+      msgId: randomBytes(MSG_ID_BYTES),
+      timestamp: this.nowSeconds(),
+      replyPub,
+      payload: serializeAnnounce({ devicePub: device.pub, label }),
+    });
+    const body = serializeUserMsgFrame({ topic, body: inner });
+    await this.bus.send(USER_DATA_KIND, offer.pairPub, body, { stem: true });
+    return { sas: sasForDevice(device.sk, offer.pairPub, offer.salt), device };
+  }
+
+  /**
+   * Grant the device that produced `devicePub`, after the user confirmed the
+   * two strings match. Signs it into the account, publishes the updated device
+   * list, and sends it the account secret.
+   */
+  async confirmPairing(devicePub: Uint8Array, caps = 0): Promise<void> {
+    const pending = this.pairingRequests.get(toHex(devicePub));
+    if (!pending) throw new Error('no pairing request from that device');
+    const identity = this.keyring.requireIdentitySecret();
+    const createdAt = BigInt(this.nowSeconds());
+    const entry = {
+      deviceId: deviceId(devicePub),
+      devicePub: devicePub.slice(),
+      createdAt,
+      caps,
+      label: pending.label,
+      cert: signDeviceCert(identity.sk, { devicePub, createdAt, caps }),
+    };
+
+    // Keep whatever devices were already listed; this one joins them.
+    let devices: DeviceEntry[] = [entry];
+    if (this.keyring.deviceList.length > 0) {
+      try {
+        devices = [...parseDeviceList(this.keyring.deviceList).devices, entry];
+      } catch {
+        // Unreadable list: start a fresh one rather than refuse to pair.
+      }
+    }
+    const list = signDeviceList(
+      { version: DEVICE_LIST_VERSION, accountEpoch: this.keyring.epoch, devices },
+      identity.sk,
+    );
+    const deviceList = serializeDeviceList(list);
+    this.keyring.deviceList = deviceList;
+
+    const grant = serializeGrant({
+      accountEpoch: this.keyring.epoch,
+      accountSecret: this.keyring.accountSecret(),
+      identityPub: identity.pub,
+      cert: entry.cert,
+      caps,
+      deviceList,
+    });
+    const inner = signAuthFrame(
+      { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), payload: grant },
+      identity,
+      TOPIC_PAIR,
+      pending.replyPub,
+    );
+    const body = serializeUserMsgFrame({ topic: TOPIC_PAIR, body: inner });
+    await this.bus.send(USER_DATA_KIND, pending.replyPub, body, { stem: true });
+    this.pairingRequests.delete(toHex(devicePub));
+  }
+
+  /** A device announced itself on one of our pairing topics. */
+  private onPairingAnnounce(topic: string, frame: AuthFrame): void {
+    const offer = this.pairingOffers.get(topic);
+    if (!offer || this.now() > offer.expiresAt) return;
+    if (!frame.replyPub) return; // nowhere to send the grant
+    let announce;
+    try {
+      announce = parseAnnounce(frame.payload);
+    } catch {
+      return;
+    }
+    this.pairingRequests.set(toHex(announce.devicePub), {
+      devicePub: announce.devicePub,
+      label: announce.label,
+      replyPub: frame.replyPub,
+    });
+    this.emit('pairingRequest', {
+      sas: sasForPrimary(offer.pairSk, announce.devicePub, offer.salt),
+      devicePub: announce.devicePub,
+      label: announce.label,
+    });
+  }
+
+  /** The primary granted us membership. */
+  private onPairingGrant(frame: AuthFrame): void {
+    const pending = this.pendingPairing;
+    if (!pending || !frame.sender) return;
+    let grant;
+    try {
+      grant = parseGrant(frame.payload);
+    } catch {
+      return;
+    }
+    // The grant is signed by the identity it claims to be, and the device list
+    // must name us — otherwise this is not a grant we can act on.
+    if (toHex(grant.identityPub) !== toHex(frame.sender)) return;
+    if (!verifyDeviceCert(grant.identityPub, { devicePub: pending.device.pub, createdAt: 0n, caps: grant.caps }, grant.cert)) {
+      // createdAt is not known to us, so fall back to the list, which is what
+      // peers will actually check against.
+      try {
+        const list = parseDeviceList(grant.deviceList);
+        if (!verifyDeviceList(grant.identityPub, list).ok || !isListedDevice(list, pending.device.pub)) return;
+      } catch {
+        return;
+      }
+    }
+    this.pendingPairing = undefined;
+    this.emit('paired', grant);
+  }
+
   // ---------------------------------------------------------------- receiving
 
   private async onUserData(m: InboundMessage): Promise<void> {
@@ -751,6 +958,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     // sender could actually have known:
     //   broadcast          zeros — the message is for everyone
     //   prekey response    the requester's reply key
+    //   pairing grant      the joining device's reply key. The sender cannot
+    //                      bind to that device's identity: it has none yet,
+    //                      which is the entire reason it is pairing.
     //   shared-key traffic the shared key itself. A sender addressing a GROUP
     //                      cannot bind to any one member's identity; that is
     //                      the whole point of one envelope for the group.
@@ -758,7 +968,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const sharedBound = m.sessionPub !== undefined && this.sharedKeys.has(toHex(m.sessionPub));
     const recipientForSig =
       scope === 'broadcast' ? BROADCAST_RECIPIENT
-      : topic === TOPIC_PREKEY_RESPONSE ? (m.sessionPub ?? BROADCAST_RECIPIENT)
+      : topic === TOPIC_PREKEY_RESPONSE || topic === TOPIC_PAIR ? (m.sessionPub ?? BROADCAST_RECIPIENT)
       : sharedBound ? m.sessionPub!
       : this.keyring.identity.pub;
     if (!verifyAuthFrame(frame, topic, recipientForSig)) return;
@@ -772,6 +982,8 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (topic.startsWith(TOPIC_PREKEY_RESPONSE + '/')) return this.onPrekeyRequest(topic, frame, scope);
     if (topic === TOPIC_PREKEY_RESPONSE) return this.onPrekeyResponse(frame, m);
     if (topic === TOPIC_ACK) return this.onAck(frame, scope);
+    if (topic.startsWith(TOPIC_PAIR + '/')) return this.onPairingAnnounce(topic, frame);
+    if (topic === TOPIC_PAIR) return this.onPairingGrant(frame);
     if (isReservedTopic(topic)) return;
 
     if (frame.sender) {

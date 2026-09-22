@@ -22,6 +22,7 @@ import { concat, toHex, utf8 } from '../common/bytes.js';
 import { Reader, Writer } from '../common/serialize.js';
 import { ecdh } from '../bus/bls.js';
 import type { NetworkName } from '../net/messages.js';
+import { TOPIC_PAIR } from '../usermsg/topics.js';
 
 export const PAIR_HRP = 'navpair';
 export const PAIRING_VERSION = 1;
@@ -73,9 +74,13 @@ export function decodePairingOffer(s: string): PairingOffer {
 /**
  * Topic the new device answers on. A hash of the single-use pairing key, so it
  * identifies no account and stops existing when the offer expires.
+ *
+ * Truncated to 24 bytes of hash: the prefix is 13 bytes and a topic may be at
+ * most 64, so the full 64-hex digest would not fit and every pairing would
+ * fail at serialisation.
  */
 export function pairingTopic(pairPub: Uint8Array): string {
-  return `_p2pmsg/pair/${toHex(sha256(pairPub))}`;
+  return `${TOPIC_PAIR}/${toHex(sha256(pairPub).subarray(0, 24))}`;
 }
 
 /**

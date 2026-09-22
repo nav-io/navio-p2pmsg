@@ -195,13 +195,19 @@ been later.
   nobody can verify. A secondary does not answer prekey discovery, because it
   cannot sign a bundle and an unsigned one would be worse than silence.
 
-Still open in M4:
+- ✅ **The live pairing exchange.** `startPairing()` on the primary returns a
+  `navpair1…` offer; `requestPairing()` on the joining device answers on a
+  topic derived from a hash of the single-use offer key and returns the short
+  authentication string; `confirmPairing()` signs the device into the account,
+  publishes the updated device list and sends the grant. Nothing is granted
+  until a human confirms the two strings match — ECDH alone proves nothing
+  about who is on the other end.
 
-- The live pairing exchange over the bus (the codecs and the SAS exist; the
-  conversation between the two devices does not, so a grant is currently moved
-  by the application).
+Still open in M4:
 - Revocation beyond the key rotation: publishing the revocation record and
-  rekeying the groups the device belonged to.
+  rekeying the groups the device belonged to. `rotateAccountEpoch()` already
+  locks a device out of the next epoch; what is missing is telling the other
+  devices and the groups.
 - State sync: contacts, group epochs, read state, and the batched
   sent-message mirror.
 

@@ -2,10 +2,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MessagingClient, type MessagingEvents, type PeerNetwork } from './client.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { generateDevice, signDeviceCert } from '../devices/hierarchy.js';
-import { DEVICE_LIST_VERSION, serializeDeviceList, signDeviceList } from '../devices/list.js';
+import {
+  DEVICE_LIST_VERSION,
+  isListedDevice,
+  parseDeviceList,
+  serializeDeviceList,
+  signDeviceList,
+  verifyDeviceList,
+} from '../devices/list.js';
 import { decodeIdentity } from './bundle.js';
 import { Emitter } from '../net/emitter.js';
-import { utf8, fromUtf8 } from '../common/bytes.js';
+import { utf8, fromUtf8, toHex } from '../common/bytes.js';
 import { parseEnvelope } from '../bus/envelope.js';
 import { FMD_FLAG_SIZE, FMD_GAMMA, fmdTest } from '../bus/fmd.js';
 
@@ -446,4 +453,94 @@ describe('secondary device built from a pairing grant', () => {
     // the correspondent's concern.
     expect(ev.from).toBe(primary.identity);
   }, 40000);
+});
+
+describe('device pairing over the bus', () => {
+  it('pairs a new device end to end and the grant works', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 50);
+    // The joining device runs on a throwaway identity purely to reach the bus;
+    // it publishes nothing under it and discards it once paired.
+    const joining = await mk(hub, 51);
+
+    const { offer, expiresAt } = primary.startPairing();
+    expect(offer.startsWith('navpair1')).toBe(true);
+    expect(expiresAt).toBeGreaterThan(Date.now());
+
+    const asked = waitFor(primary, 'pairingRequest');
+    const { sas: onDevice, device } = await joining.requestPairing(offer, "Alex's phone");
+    const req = await asked;
+
+    // The two strings must match; this is the only thing authenticating the
+    // exchange, so a mismatch is what a user is meant to catch.
+    expect(req.sas).toBe(onDevice);
+    expect(req.label).toBe("Alex's phone");
+    expect(toHex(req.devicePub)).toBe(toHex(device.pub));
+
+    const granted = waitFor(joining, 'paired');
+    await primary.confirmPairing(req.devicePub);
+    const grant = await granted;
+
+    expect(grant.accountEpoch).toBe(primary.keyring.epoch);
+    expect(toHex(grant.identityPub)).toBe(toHex(primary.keyring.identity.pub));
+    // The grant carries the account secret and never the seed.
+    expect(grant.accountSecret).toHaveLength(32);
+
+    // The device list the primary now publishes names the new device.
+    const list = parseDeviceList(primary.keyring.deviceList);
+    expect(verifyDeviceList(primary.keyring.identity.pub, list).ok).toBe(true);
+    expect(isListedDevice(list, device.pub)).toBe(true);
+
+    // And the grant actually builds a working secondary.
+    const secondary = await mk(hub, 52, {
+      seed: undefined,
+      grant: { accountSecret: grant.accountSecret, identityPub: grant.identityPub, epoch: grant.accountEpoch },
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+    expect(secondary.identity).toBe(primary.identity);
+    expect(secondary.keyring.prekey.pub).toEqual(primary.keyring.prekey.pub);
+  }, 40000);
+
+  it('shows a different string to a device answering a substituted offer', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 53);
+    const attacker = await mk(hub, 54);
+    const joining = await mk(hub, 55);
+
+    const real = primary.startPairing();
+    // The attacker photographed the QR and makes its own offer instead.
+    const fake = attacker.startPairing();
+    const { sas: deviceSees } = await joining.requestPairing(fake.offer, 'victim');
+    const asked = waitFor(primary, 'pairingRequest', () => true, 2000).catch(() => undefined);
+
+    // The primary never hears about it — the device answered a different
+    // topic — and even if it had, the strings would not match.
+    expect(await asked).toBeUndefined();
+    expect(deviceSees).toHaveLength(6);
+    expect(real.offer).not.toBe(fake.offer);
+  }, 30000);
+
+  it('refuses to admit devices from a secondary', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 56);
+    const device = generateDevice();
+    const secondary = await mk(hub, 57, {
+      seed: undefined,
+      grant: {
+        accountSecret: primary.keyring.accountSecret(),
+        identityPub: primary.keyring.identity.pub,
+        epoch: primary.keyring.epoch,
+      },
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: primary.keyring.identity.pub },
+    });
+    // Admitting a device means signing a certificate, which needs the seed.
+    expect(() => secondary.startPairing()).toThrow(/primary/);
+  }, 30000);
+
+  it('ignores a confirmation for a device that never asked', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 58);
+    primary.startPairing();
+    await expect(primary.confirmPairing(generateDevice().pub)).rejects.toThrow(/no pairing request/);
+  }, 30000);
 });

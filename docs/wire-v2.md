@@ -92,6 +92,30 @@ re-flag a retransmission for a recipient whose clue key changed. It is also a
 small amplification surface, bounded by the fact that each variant costs a
 fresh proof of work.
 
+## Delivery is an attempt, not a promise
+
+The bus is a flood network with Dandelion++ stem routing in front of it. A
+stem send reaches exactly one peer, which forwards it to one more, and only
+after some hops does the envelope fluff out to everybody. Any of those hops
+can drop it, so a single send is one attempt at delivery rather than delivery.
+
+Application messages already account for this: the outbox retransmits until an
+ack comes back. Prekey discovery has no outbox — it is a broadcast request and
+a directed reply — so it does its own retrying:
+
+- the requester sends up to three requests spread over the discovery timeout,
+  reusing the same reply key so a late answer to an earlier attempt still
+  resolves, and fluffs the last one;
+- the responder answers a given reply key up to three times inside its rate
+  limit window instead of once, and fluffs every answer after the first, since
+  a repeat request means the previous answer most likely died on a stem hop.
+
+Nodes have their own half of this: a relay that cannot flood an envelope to
+any peer other than the one it came from hands it back to that peer instead of
+dropping it, so a stem hop that lands at the end of the graph does not lose the
+message. Without that, every line topology silently swallowed whatever the stem
+routed into its ends.
+
 ## Query PoW
 
 Archive queries reuse `PoWHeader` with:

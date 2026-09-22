@@ -5,7 +5,7 @@
  */
 import { Emitter } from '../net/emitter.js';
 import { PeerPool, type PeerPoolOptions } from '../net/pool.js';
-import type { NetworkName } from '../net/messages.js';
+import { type NetworkName, ServiceFlags } from '../net/messages.js';
 import { BusClient, type InboundMessage } from '../bus/client.js';
 import { BusKeys } from '../bus/keyring.js';
 import { PowGrinder } from '../bus/pow-grinder.js';
@@ -23,6 +23,10 @@ import { MirrorBatcher, type MirrorEntry, parseMirror, serializeMirror } from '.
 
 /** One envelope's worth of mirror copies, leaving room for framing. */
 const MAX_MIRROR_BYTES = 3000;
+/** Discovery requests sent before giving up, spread over the timeout. */
+const DISCOVERY_ATTEMPTS = 3;
+/** Answers to one reply key inside the rate-limit window; matches the retries. */
+const PREKEY_REPLIES_PER_KEY = 3;
 /** How long a burst of sends accumulates before one mirror goes out. */
 const MIRROR_FLUSH_MS = 30_000;
 
@@ -320,7 +324,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retrying = false;
   private closed = false;
-  private lastPrekeyReply = new Map<string, number>();
+  private readonly lastPrekeyReply = new Map<string, { at: number; count: number }>();
 
   private constructor(o: MessagingClientOptions, store: Store, keyring: Keyring, contacts: Contacts, outbox: Outbox) {
     super();
@@ -463,18 +467,20 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   }
 
   /**
-   * Retrieve messages that arrived while we were offline, from connected peers
-   * advertising `NODE_P2PMSG_ARCHIVE`. Resolves to what was fetched; retrieved
-   * messages surface through the ordinary `message` event, so an application
-   * does not have to treat them specially.
-   *
-   * Requires a `PeerPool` (the default). Returns zero peers when the network
-   * was supplied by the application or no archiving peer is connected.
-   *
-   * `precision` is the false-positive exponent: lower means more decoys, more
-   * bandwidth and a larger anonymity set, and the maximum tells the archiving
-   * node almost exactly which messages are ours. Default 8.
+   * Connected peers that advertise NODE_P2PMSG_ARCHIVE, i.e. the ones a
+   * `syncArchive()` could actually reach. Empty means there is nothing to
+   * catch up from, which is worth showing a user rather than reporting a sync
+   * that retrieved nothing.
    */
+  archivePeers(): string[] {
+    const pool = this.pool;
+    if (!(pool instanceof PeerPool)) return [];
+    return pool
+      .peers()
+      .filter((p) => (p.services & ServiceFlags.NODE_P2PMSG_ARCHIVE) === ServiceFlags.NODE_P2PMSG_ARCHIVE)
+      .map((p) => p.id);
+  }
+
   /**
    * Run an archive sync with a detection key that is not this account's own —
    * a group's, for instance. Returns how many envelopes the bus accepted.
@@ -497,6 +503,19 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     }
   }
 
+  /**
+   * Retrieve messages that arrived while we were offline, from connected peers
+   * advertising `NODE_P2PMSG_ARCHIVE`. Resolves to what was fetched; retrieved
+   * messages surface through the ordinary `message` event, so an application
+   * does not have to treat them specially.
+   *
+   * Requires a `PeerPool` (the default). Returns zero peers when the network
+   * was supplied by the application or no archiving peer is connected.
+   *
+   * `precision` is the false-positive exponent: lower means more decoys, more
+   * bandwidth and a larger anonymity set, and the maximum tells the archiving
+   * node almost exactly which messages are ours. Default 8.
+   */
   async syncArchive(opts: { precision?: number; limit?: number } = {}): Promise<SyncResult> {
     const pool = this.pool;
     if (!(pool instanceof PeerPool)) {
@@ -667,15 +686,49 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     this.keys.addSessionKey(sk, pub, timeoutMs + 5000);
     const result = new Promise<Bundle>((resolve, reject) => {
       const timer = setTimeout(() => {
+        const entry = this.discoveries.get(key);
         this.discoveries.delete(key);
         this.keys.removeSessionKey(pub);
-        reject(new Error(`prekey discovery for ${encodeIdentity(id)} timed out`));
+        // Reject through the STORED reject, not the one captured here: a
+        // concurrent discover() chains onto the stored callbacks, and
+        // rejecting the local one would leave every chained caller hanging
+        // forever instead of failing.
+        (entry?.reject ?? reject)(new Error(`prekey discovery for ${encodeIdentity(id)} timed out`));
       }, timeoutMs);
       this.discoveries.set(key, { sessionPub: pub, resolve, reject, timer });
     });
-    const frame: AuthFrame = { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), replyPub: pub, payload: new Uint8Array(0) };
-    const body = serializeUserMsgFrame({ topic: prekeyRequestTopic(id), body: serializeAuthFrame(frame) });
-    await this.bus.sendBroadcast(USER_DATA_KIND, body, { stem: true });
+    // Re-send while we wait. The bus is a lossy flood network and a stem send
+    // reaches ONE peer, which forwards probabilistically — so a single request
+    // is not delivery, it is one attempt. Ordinary messages get this from the
+    // outbox; discovery had nothing, and simply timed out whenever a stem
+    // route failed to reach the target.
+    //
+    // The reply key is reused across attempts, so a late answer to an earlier
+    // attempt still resolves, and the last attempt fluffs: by then reliability
+    // matters more than hiding which node the lookup entered from. The request
+    // names no requester either way — only a hash of who is being looked up.
+    const attempts = Math.max(1, DISCOVERY_ATTEMPTS);
+    const gap = Math.floor(timeoutMs / attempts);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (!this.discoveries.has(key)) break; // already answered
+      const frame: AuthFrame = {
+        msgId: randomBytes(MSG_ID_BYTES),
+        timestamp: this.nowSeconds(),
+        replyPub: pub,
+        payload: new Uint8Array(0),
+      };
+      const body = serializeUserMsgFrame({ topic: prekeyRequestTopic(id), body: serializeAuthFrame(frame) });
+      try {
+        await this.bus.sendBroadcast(USER_DATA_KIND, body, { stem: attempt < attempts - 1 });
+      } catch (e) {
+        this.emit('error', e instanceof Error ? e : new Error(String(e)));
+      }
+      if (attempt === attempts - 1) break;
+      await Promise.race([
+        result.catch(() => undefined),
+        new Promise((r) => setTimeout(r, gap)),
+      ]);
+    }
     return result;
   }
 
@@ -1372,11 +1425,18 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     // A secondary device cannot sign a bundle, and answering with an
     // unsigned one would be worse than staying quiet: the primary answers.
     if (!this.keyring.isPrimary) return;
-    // Rate limit per reply key: one answer per 10 s.
+    // Rate limit per reply key. A requester re-sends while it waits, because
+    // one stem send is an attempt rather than a delivery — so answering only
+    // once per key would leave a lost response unrecoverable for the whole
+    // window. Allow a few answers per key instead: the amplification stays
+    // bounded at PREKEY_REPLIES_PER_KEY per reply key, and a requester that
+    // is plainly still asking gets an answer.
     const k = toHex(frame.replyPub);
-    const last = this.lastPrekeyReply.get(k) ?? 0;
-    if (this.now() - last < 10_000) return;
-    this.lastPrekeyReply.set(k, this.now());
+    const seen = this.lastPrekeyReply.get(k);
+    if (seen && this.now() - seen.at < 10_000 && seen.count >= PREKEY_REPLIES_PER_KEY) return;
+    let replyCount = 1;
+    if (seen && this.now() - seen.at < 10_000) replyCount = ++seen.count;
+    else this.lastPrekeyReply.set(k, { at: this.now(), count: 1 });
     if (this.lastPrekeyReply.size > 1024) this.lastPrekeyReply.clear();
     // Answer with the EXTENDED bundle: the clue key is what lets the requester
     // flag messages to us, and discovery is the only place it is published.
@@ -1388,7 +1448,10 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       frame.replyPub, // bind to the requester's reply key so the response cannot be replayed elsewhere
     );
     const body = serializeUserMsgFrame({ topic: TOPIC_PREKEY_RESPONSE, body: inner });
-    await this.bus.send(USER_DATA_KIND, frame.replyPub, body, { stem: true });
+    // The first answer stems. A repeat means the requester is still asking, so
+    // the stem route most likely dropped the previous one — fluff instead of
+    // losing it the same way twice.
+    await this.bus.send(USER_DATA_KIND, frame.replyPub, body, { stem: replyCount === 1 });
   }
 
   /**

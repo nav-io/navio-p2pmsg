@@ -9,6 +9,16 @@ export const TOPIC_ACK = '_p2pmsg/ack';
 export const TOPIC_PAIR = '_p2pmsg/pair';
 /** Account messages between a primary and its own devices (epoch rotations). */
 export const TOPIC_DEVICE = '_p2pmsg/device';
+/**
+ * Our own devices mirroring what they sent.
+ *
+ * Outgoing messages are encrypted to the RECIPIENT, so our other devices
+ * cannot read them — a copy addressed to ourselves is the only way they can
+ * show a complete conversation. It costs a second envelope and a second proof
+ * of work, which is why mirrors are batched and why a single-device account
+ * never sends one.
+ */
+export const TOPIC_MIRROR = '_p2pmsg/mirror';
 /** Default topic for 1:1 application messages when the app gives none. */
 export const TOPIC_DEFAULT = 'msg';
 

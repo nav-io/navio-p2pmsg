@@ -19,6 +19,24 @@ import { Contacts } from './contacts.js';
 import { Outbox, type OutboxEntry } from './outbox.js';
 import { Reassembler, splitChunks } from './chunker.js';
 import { signAuthFrame, signAuthFrameWithDevice, verifyAuthFrame } from './auth.js';
+import { MirrorBatcher, type MirrorEntry, parseMirror, serializeMirror } from './mirror.js';
+
+/** One envelope's worth of mirror copies, leaving room for framing. */
+const MAX_MIRROR_BYTES = 3000;
+/** How long a burst of sends accumulates before one mirror goes out. */
+const MIRROR_FLUSH_MS = 30_000;
+
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
 import {
   type AuthFrame,
   BROADCAST_RECIPIENT,
@@ -78,6 +96,7 @@ import {
   TOPIC_ACK,
   TOPIC_DEFAULT,
   TOPIC_DEVICE,
+  TOPIC_MIRROR,
   TOPIC_PAIR,
   TOPIC_PREKEY_RESPONSE,
   isReservedTopic,
@@ -228,6 +247,11 @@ export type MessagingEvents = {
    * longer read anything new.
    */
   accountEpoch: { epoch: number; deviceList: Uint8Array };
+  /**
+   * A message another of OUR devices sent. Surfaced separately from `message`
+   * so an application can render it as outgoing rather than incoming.
+   */
+  mirrored: { to: string; topic: string; payload: Uint8Array; timestamp: number };
   /** This device was granted membership of an account. */
   paired: { accountEpoch: number; accountSecret: Uint8Array; identityPub: Uint8Array; cert: Uint8Array; caps: number; deviceList: Uint8Array };
   /** A verified prekey bundle was learned for a contact. */
@@ -268,6 +292,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private readonly pairingOffers = new Map<string, { pairSk: Uint8Array; pairPub: Uint8Array; salt: Uint8Array; expiresAt: number }>();
   /** Devices that announced themselves and are awaiting the user's confirmation. */
   private readonly pairingRequests = new Map<string, { devicePub: Uint8Array; label: string; replyPub: Uint8Array }>();
+  /** Batches sent-message copies for our other devices. */
+  private readonly mirror = new MirrorBatcher(MAX_MIRROR_BYTES);
+  private mirrorTimer: ReturnType<typeof setTimeout> | null = null;
   /** Set on the device being added, between requestPairing and the grant. */
   private pendingPairing: { device: DeviceIdentity; replyPub: Uint8Array; offer: PairingOffer } | undefined;
   readonly keyring: Keyring;
@@ -493,6 +520,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   close(): void {
     this.closed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.mirrorTimer) clearTimeout(this.mirrorTimer);
     for (const p of this.pendingAcks.values()) clearTimeout(p.timer);
     for (const d of this.discoveries.values()) {
       clearTimeout(d.timer);
@@ -743,6 +771,8 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     o: { sign: boolean; stem: boolean; archivable?: boolean; signal?: AbortSignal },
   ): Promise<void> {
     const recipientKey = await this.recipientKey(entry.recipient);
+    // Captured before markSent, which increments it.
+    const firstAttempt = entry.attempts === 0;
     const replyPub = o.sign ? this.mintReplyKey(entry.recipient) : undefined;
     const pending = this.outbox.pendingChunks(entry);
     for (const idx of pending) {
@@ -767,11 +797,22 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       this.emit('sent', { msgId: entry.msgId, chunk: idx, attempt: entry.attempts + 1, peers: typeof peers === 'number' ? peers : this.pool.connectedCount });
     }
     await this.outbox.markSent(entry.msgId);
+    // Only the first transmission is mirrored: a retry is the same message,
+    // and our other devices already have it.
+    if (o.sign && firstAttempt) {
+      this.queueMirror({
+        recipient: entry.recipient,
+        topic: entry.topic,
+        timestamp: this.nowSeconds(),
+        payload: entry.chunks.length === 1 ? entry.chunks[0]! : concatChunks(entry.chunks),
+      });
+    }
   }
 
   private scheduleRetry(delayMs: number): void {
     if (this.closed) return;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.mirrorTimer) clearTimeout(this.mirrorTimer);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.retryTick().catch((e) => this.emit('error', e as Error)).finally(() => this.scheduleRetry(this.opts.retryTickMs));
@@ -897,6 +938,89 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     }
     this.keys.setInbox(this.keyring.prekey.sk, this.keyring.prekey.pub);
     this.emit('accountEpoch', { epoch: grant.accountEpoch, deviceList: grant.deviceList });
+  }
+
+
+  // --------------------------------------------------------------------- mirror
+
+  /**
+   * Queue a copy of something we sent for our other devices.
+   *
+   * No-op when the account has no other device: the copy costs a whole
+   * envelope and a whole proof of work, and there is nobody to read it.
+   */
+  private queueMirror(entry: MirrorEntry): void {
+    if (!this.hasOtherDevices()) return;
+    const batch = this.mirror.add(entry);
+    if (batch) {
+      void this.sendMirror(batch).catch((e: unknown) => this.emit('error', e instanceof Error ? e : new Error(String(e))));
+      return;
+    }
+    // Otherwise let it accumulate briefly, so a burst of messages costs one
+    // proof of work rather than one each.
+    if (this.mirrorTimer) return;
+    this.mirrorTimer = setTimeout(() => {
+      this.mirrorTimer = null;
+      const pending = this.mirror.flush();
+      if (pending.length > 0) {
+        void this.sendMirror(pending).catch((e: unknown) => this.emit('error', e instanceof Error ? e : new Error(String(e))));
+      }
+    }, MIRROR_FLUSH_MS);
+  }
+
+  /** Flush any pending mirror copies now. */
+  async flushMirror(): Promise<void> {
+    if (this.mirrorTimer) {
+      clearTimeout(this.mirrorTimer);
+      this.mirrorTimer = null;
+    }
+    const pending = this.mirror.flush();
+    if (pending.length > 0) await this.sendMirror(pending);
+  }
+
+  private hasOtherDevices(): boolean {
+    if (this.keyring.deviceList.length === 0) return false;
+    try {
+      // The primary lists itself, so "more than one entry" is the test.
+      return parseDeviceList(this.keyring.deviceList).devices.length > 1;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Addressed to our own inbox key, so every device of ours decrypts it. */
+  private async sendMirror(entries: MirrorEntry[]): Promise<void> {
+    const payload = serializeMirror(entries);
+    // Bound to the account IDENTITY, not the inbox key: the frame arrives
+    // inbox-scoped, and an inbox-scoped frame is verified against the identity
+    // — which every device of the account knows, and the prekey is not.
+    const inner = this.signInnerFrame(
+      { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), payload },
+      TOPIC_MIRROR,
+      this.keyring.identity.pub,
+    );
+    const body = serializeUserMsgFrame({ topic: TOPIC_MIRROR, body: inner });
+    await this.bus.send(USER_DATA_KIND, this.keyring.prekey.pub, body, { stem: true });
+  }
+
+  private onMirror(frame: AuthFrame): void {
+    // Only our own account may mirror to us, and only from a device that is
+    // not this one — our own copy would just be an echo.
+    if (!frame.sender || toHex(frame.sender) !== toHex(this.keyring.identity.pub)) return;
+    let entries: MirrorEntry[];
+    try {
+      entries = parseMirror(frame.payload);
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      this.emit('mirrored', {
+        to: encodeIdentity(e.recipient),
+        topic: e.topic,
+        payload: e.payload,
+        timestamp: Number(e.timestamp),
+      });
+    }
   }
 
   // -------------------------------------------------------------------- pairing
@@ -1146,6 +1270,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (topic.startsWith(TOPIC_PAIR + '/')) return this.onPairingAnnounce(topic, frame);
     if (topic === TOPIC_PAIR) return this.onPairingGrant(frame);
     if (topic === TOPIC_DEVICE) return this.onAccountEpoch(frame);
+    if (topic === TOPIC_MIRROR) return this.onMirror(frame);
     if (isReservedTopic(topic)) return;
 
     if (frame.sender) {

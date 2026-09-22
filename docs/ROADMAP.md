@@ -210,10 +210,18 @@ Still open in M4:
   still holds once the shared inbox key has moved. A peer refuses a device list
   whose `accountEpoch` goes backwards, so replaying the list from before a
   revocation cannot re-admit the device.
-- Group rekey on revocation. The account epoch moves, but the groups the
-  revoked device belonged to keep their own epoch until an admin rotates them.
-- State sync: contacts, group epochs, read state, and the batched
-  sent-message mirror.
+- ✅ **Group rekey on revocation.** The account epoch moving no longer leaves
+  group secrets stale: every group we administer rotates automatically, and
+  groups we only belong to are reported through `groupsNeedRekey` so the user
+  can ask an admin rather than assume the revocation was complete.
+- ✅ **Sent-message mirror.** An outgoing message is encrypted to the
+  recipient, so our other devices cannot read it; without a mirror a paired
+  phone shows half of every conversation. Copies are batched — the second
+  envelope costs a second proof of work — and an account with one device sends
+  none at all.
+- State sync for contacts, group epochs and read state still rides only the
+  ordinary message path; there is no catch-up for a device that was offline
+  while those changed.
 - The grace window. The previous prekey stays decryptable so in-flight messages
   are not lost, which means a revoked device can still read that window;
   applications should say so, and an immediate cut-off is not yet offered.

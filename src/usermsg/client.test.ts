@@ -641,3 +641,96 @@ describe('device revocation', () => {
     expect(isListedDevice(current, device.pub)).toBe(false);
   }, 40000);
 });
+
+describe('sent-message mirroring', () => {
+  it('shows a secondary what the primary sent', async () => {
+    // An outgoing message is encrypted to the RECIPIENT, so our other devices
+    // cannot read it. Without a mirror a paired phone shows half of every
+    // conversation.
+    const hub = new Hub();
+    const primary = await mk(hub, 110);
+    const joining = await mk(hub, 111);
+    const { offer } = primary.startPairing();
+    const asked = waitFor(primary, 'pairingRequest');
+    const { device } = await joining.requestPairing(offer, 'phone');
+    const req = await asked;
+    const granted = waitFor(joining, 'paired');
+    await primary.confirmPairing(req.devicePub);
+    const grant = await granted;
+    const secondary = await mk(hub, 112, {
+      seed: undefined,
+      grant: { accountSecret: grant.accountSecret, identityPub: grant.identityPub, epoch: grant.accountEpoch },
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+
+    const peer = await mk(hub, 113);
+    await primary.addContact(peer.bundle());
+
+    const mirrored = waitFor(secondary, 'mirrored');
+    await primary.send(peer.identity, utf8('sent from the desktop'));
+    await primary.flushMirror();
+    const ev = await mirrored;
+    expect(fromUtf8(ev.payload)).toBe('sent from the desktop');
+    expect(ev.to).toBe(peer.identity);
+  }, 60000);
+
+  it('sends no mirror at all when the account has one device', async () => {
+    // The copy costs a whole envelope and a whole proof of work; with nobody
+    // to read it that is pure waste.
+    const hub = new Hub();
+    const net = new FakeNetwork(hub);
+    const solo = await mk(hub, 114, { pool: net });
+    const peer = await mk(hub, 115);
+    await solo.addContact(peer.bundle());
+
+    net.sent.length = 0;
+    await solo.send(peer.identity, utf8('no mirror needed'));
+    await solo.flushMirror();
+    await new Promise((r) => setTimeout(r, 300));
+    // Exactly the one message; no second envelope.
+    expect(net.sent.length).toBe(1);
+  }, 30000);
+});
+
+describe('MirrorBatcher', () => {
+  const entry = (n: number, size = 10) => ({
+    recipient: new Uint8Array(48).fill(n),
+    topic: 'msg',
+    timestamp: BigInt(n),
+    payload: new Uint8Array(size).fill(n),
+  });
+
+  it('accumulates until the budget is reached', async () => {
+    const { MirrorBatcher } = await import('./mirror.js');
+    const b = new MirrorBatcher(10_000, 64);
+    expect(b.add(entry(1))).toBeUndefined();
+    expect(b.add(entry(2))).toBeUndefined();
+    expect(b.size).toBe(2);
+    expect(b.flush()).toHaveLength(2);
+    expect(b.size).toBe(0);
+  });
+
+  it('flushes before an entry that would overflow, so a batch always fits', async () => {
+    const { MirrorBatcher } = await import('./mirror.js');
+    const b = new MirrorBatcher(200, 64);
+    expect(b.add(entry(1, 100))).toBeUndefined();
+    const batch = b.add(entry(2, 100));
+    expect(batch).toHaveLength(1); // the first one went out on its own
+    expect(b.size).toBe(1); // the new one is pending
+  });
+
+  it('respects the entry count cap', async () => {
+    const { MirrorBatcher } = await import('./mirror.js');
+    const b = new MirrorBatcher(1_000_000, 3);
+    expect(b.add(entry(1))).toBeUndefined();
+    expect(b.add(entry(2))).toBeUndefined();
+    expect(b.add(entry(3))).toHaveLength(3);
+  });
+
+  it('round trips the wire form', async () => {
+    const { parseMirror, serializeMirror } = await import('./mirror.js');
+    const entries = [entry(1, 5), entry(2, 0)];
+    expect(parseMirror(serializeMirror(entries))).toEqual(entries);
+    expect(parseMirror(serializeMirror([]))).toEqual([]);
+  });
+});

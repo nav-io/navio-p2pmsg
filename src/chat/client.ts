@@ -83,6 +83,12 @@ export type ChatEvents = {
   profile: { identity: string; profile: ProfileBody };
   /** Group membership or metadata changed. */
   group: { groupId: Uint8Array; state: GroupState };
+  /**
+   * Groups a revoked device could still read, because rotating the ACCOUNT
+   * epoch does not rotate a GROUP's keys. Groups we administer are rekeyed
+   * automatically; these are the ones only someone else can rotate.
+   */
+  groupsNeedRekey: { groupIds: Uint8Array[] };
   error: Error;
 };
 
@@ -105,6 +111,7 @@ export class ChatClient extends Emitter<ChatEvents> {
   /** Unsubscribe from the transport's message event. Named to avoid clashing
    *  with Emitter's own `off`. */
   private unsubscribe: (() => void) | undefined;
+  private unsubscribeEpoch: (() => void) | undefined;
   private closed = false;
 
   private constructor(
@@ -120,6 +127,13 @@ export class ChatClient extends Emitter<ChatEvents> {
   static async create(o: ChatClientOptions): Promise<ChatClient> {
     const c = new ChatClient(o.client, o.store, o.now ?? (() => Date.now()));
     await c.loadGroups();
+    // A revoked device keeps every group secret it was given, so the account
+    // epoch moving is exactly when the groups we administer must rotate too.
+    c.unsubscribeEpoch = o.client.on('accountEpoch', () => {
+      void c.rekeyAdministeredGroups().catch((e: unknown) =>
+        c.emit('error', e instanceof Error ? e : new Error(String(e))),
+      );
+    });
     c.unsubscribe = o.client.on('message', (m) => {
       void c.onMessage(m).catch((e: unknown) => c.emit('error', e instanceof Error ? e : new Error(String(e))));
     });
@@ -130,6 +144,8 @@ export class ChatClient extends Emitter<ChatEvents> {
     this.closed = true;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.unsubscribeEpoch?.();
+    this.unsubscribeEpoch = undefined;
   }
 
   /** Our own identity, `navid1…`. */
@@ -527,6 +543,40 @@ export class ChatClient extends Emitter<ChatEvents> {
       await this.sendGroupKeys(encodeIdentity(m.identity), next, secret);
     }
     return next;
+  }
+
+  /**
+   * Rotate the keys of every group we administer.
+   *
+   * Revoking a device moves the ACCOUNT epoch, but a group has its own epoch
+   * and its own secret — which the revoked device still holds. Until the group
+   * rekeys, that device keeps reading it. Called automatically when the
+   * account epoch moves.
+   *
+   * Groups we do not administer cannot be rotated by us. They are reported
+   * through `groupsNeedRekey` so the user can ask an admin rather than assume
+   * the revocation was complete.
+   */
+  async rekeyAdministeredGroups(): Promise<{ rekeyed: Uint8Array[]; needsAdmin: Uint8Array[] }> {
+    const me = decodeIdentity(this.client.identity);
+    const rekeyed: Uint8Array[] = [];
+    const needsAdmin: Uint8Array[] = [];
+    for (const state of await this.groups()) {
+      const mine = memberOf(state, me);
+      if (!mine) continue;
+      if (mine.role === GroupRole.MEMBER) {
+        needsAdmin.push(state.groupId);
+        continue;
+      }
+      try {
+        await this.groupOp(state.groupId, { kind: 'rekey' });
+        rekeyed.push(state.groupId);
+      } catch (e) {
+        this.emit('error', e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+    if (needsAdmin.length > 0) this.emit('groupsNeedRekey', { groupIds: needsAdmin });
+    return { rekeyed, needsAdmin };
   }
 
   /** `navinv1…` carrying the current epoch secret. Whoever holds it can join. */

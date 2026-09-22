@@ -24,7 +24,13 @@ export type GroupOp =
   | { kind: 'leave'; identity: Uint8Array }
   | { kind: 'promote'; identity: Uint8Array; role: number }
   | { kind: 'rename'; name: string }
-  | { kind: 'setTopic'; topic: string };
+  | { kind: 'setTopic'; topic: string }
+  /**
+   * Rotate the keys without changing anything else. Used when a device is
+   * revoked: the account epoch moves, but the group's own secret does not, and
+   * the revoked device still holds it.
+   */
+  | { kind: 'rekey' };
 
 export interface ApplyResult {
   state: GroupState;
@@ -38,6 +44,8 @@ export function requiresRekey(op: GroupOp): boolean {
     case 'remove':
     case 'leave':
       // Mandatory: otherwise the departing member reads everything afterwards.
+      return true;
+    case 'rekey':
       return true;
     case 'add':
       // Default on, so members join forward-only.
@@ -115,6 +123,10 @@ export function applyGroupOp(
     case 'setTopic': {
       requireAdmin(state, author.identity);
       topic = op.topic;
+      break;
+    }
+    case 'rekey': {
+      requireAdmin(state, author.identity);
       break;
     }
   }

@@ -464,3 +464,58 @@ describe('ChatClient groups', () => {
     expect(invite.epochSecret).toHaveLength(32);
   }, 60000);
 });
+
+describe('group rekey after device revocation', () => {
+  it('rotates groups we administer and reports the ones we cannot', async () => {
+    // Revoking a device moves the ACCOUNT epoch, but a group keeps its own
+    // secret — which the revoked device still holds. Without this the
+    // revocation would look complete and quietly not be.
+    const hub = new Hub();
+    const a = await mk(hub, 100);
+    const b = await mk(hub, 101);
+    await a.client.addContact(b.client.bundle());
+    await b.client.addContact(a.client.bundle());
+    await a.chat.markKnown(b.chat.identity);
+    await b.chat.markKnown(a.chat.identity);
+
+    const joined = waitFor(b.chat, 'group');
+    const groupId = await a.chat.createGroup('needs rotating', [b.chat.identity]);
+    await joined;
+    expect((await a.chat.groupState(groupId))!.epoch).toBe(0);
+
+    // A owns the group, so A can rotate it.
+    const res = await a.chat.rekeyAdministeredGroups();
+    expect(res.rekeyed.map(toHex)).toEqual([toHex(groupId)]);
+    expect((await a.chat.groupState(groupId))!.epoch).toBe(1);
+
+    // B is only a member: it cannot rotate, and must be told rather than left
+    // believing the revocation covered everything.
+    const warned = waitFor(b.chat, 'groupsNeedRekey');
+    const bRes = await b.chat.rekeyAdministeredGroups();
+    expect(bRes.rekeyed).toHaveLength(0);
+    expect(bRes.needsAdmin.map(toHex)).toEqual([toHex(groupId)]);
+    expect((await warned).groupIds.map(toHex)).toEqual([toHex(groupId)]);
+  }, 60000);
+
+  it('keeps the group working across the rotation', async () => {
+    const hub = new Hub();
+    const a = await mk(hub, 104);
+    const b = await mk(hub, 105);
+    await a.client.addContact(b.client.bundle());
+    await b.client.addContact(a.client.bundle());
+    await a.chat.markKnown(b.chat.identity);
+    await b.chat.markKnown(a.chat.identity);
+
+    const joined = waitFor(b.chat, 'group');
+    const groupId = await a.chat.createGroup('still works', [b.chat.identity]);
+    await joined;
+
+    const rotated = waitFor(b.chat, 'group', (e) => e.state.epoch === 1);
+    await a.chat.rekeyAdministeredGroups();
+    await rotated;
+
+    const got = waitFor(b.chat, 'message', (e) => e.message.text === 'after rotation');
+    await a.chat.sendGroupText(groupId, 'after rotation');
+    expect((await got).message.text).toBe('after rotation');
+  }, 60000);
+});

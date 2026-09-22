@@ -98,6 +98,7 @@ await client.syncArchive({ precision: 8 });
 | `navio-p2pmsg/net` | `PeerPool`, `Peer`, TCP/WS transports, P2P codec |
 | `navio-p2pmsg/stores` | `Store` interface, `MemoryStore`, `FileStore`, `IndexedDBStore` |
 | `navio-p2pmsg/archive` | `ArchiveClient`, the `getp2pmsgs`/`p2pmsgs` codecs |
+| `navio-p2pmsg/chat` | `ChatClient`: conversations, replies, reactions, edits, deletes, contact requests |
 
 `navio-p2pmsg/net` also carries a full **BIP324 v2 transport** (ElligatorSwift
 over secp256k1, the rekeying ciphers, the handshake). Opt in per client with

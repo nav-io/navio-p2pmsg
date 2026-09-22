@@ -87,10 +87,32 @@ Still open in M1:
   `Sock` and v2 transport detection is byte-stream based, so it is expected to
   work unchanged — expectation, not evidence, until a test proves it.
 
-### M2 — chat layer
+### M2 — chat layer (in progress)
 
-Chat frames, causal DAG, history store and indexes, search index, conversations,
-profiles, contact requests, blocklist, read receipts, delivery state UI hooks.
+Done, in `src/chat/`:
+
+- ✅ `frame.ts` — versioned chat frames, Bitcoin-serialised, content-addressed
+  ids, and the text / edit / delete / reaction / receipt / profile / contact
+  bodies. Deterministic 1:1 conversation ids, so neither side negotiates.
+- ✅ `dag.ts` — parent hashes + Lamport, deterministic topological order, head
+  tracking, and **gap detection**: a cited parent we do not hold is reported,
+  which is what lets a client tell "nothing was said" from "something was
+  lost".
+- ✅ `store.ts` — persistence over the existing `Store` with prefix-scan
+  indexes, plus resolution of edits, deletes and reactions into a render-ready
+  view. Edits and deletes are honoured only from the original author.
+- ✅ `client.ts` — `ChatClient`: send, reply, edit, delete, react, read state,
+  contact requests, and a local-only blocklist that is never published.
+
+Still open in M2:
+
+- Read receipts are **sent** but not applied on receipt, so "read by" is not
+  surfaced yet.
+- Bundled full-text search (decision 38).
+- Profile frames are defined but not exchanged automatically.
+- Typing and presence — they belong on the direct channel (decision 34), so
+  they wait for M5.
+
 Exit: two CLI clients hold a real conversation with replies, reactions, edits,
 deletes and read state, surviving restart and out-of-order archive replay.
 

@@ -8,6 +8,7 @@ export default defineConfig({
     'usermsg/index': 'src/usermsg/index.ts',
     'stores/index': 'src/stores/index.ts',
     'archive/index': 'src/archive/index.ts',
+    'chat/index': 'src/chat/index.ts',
     'bus/pow-worker': 'src/bus/pow-worker.ts',
   },
   format: ['esm', 'cjs'],

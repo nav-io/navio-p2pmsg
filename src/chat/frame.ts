@@ -302,6 +302,49 @@ export function parseProfileBody(bytes: Uint8Array): ProfileBody {
   return out;
 }
 
+/**
+ * Payments in a conversation.
+ *
+ * Message types only: this package deliberately has no wallet and no chain
+ * dependency — that is the reason it exists, and `navio-sdk` is an optional
+ * peer dependency an application wires up itself. What travels here is the
+ * request or the receipt, never a key or a signature over a transaction.
+ */
+export const PaymentOp = { REQUEST: 1, SENT: 2 } as const;
+
+export interface PaymentBody {
+  op: number;
+  /** Smallest unit, as the chain counts it. */
+  amount: bigint;
+  /** Empty for the chain's native asset. */
+  tokenId: string;
+  memo: string;
+  /**
+   * For SENT: the output hash the payment produced. Note navio-core's
+   * `sendtoblsctaddress` returns an output hash rather than a txid, so this is
+   * what a recipient can actually look up.
+   */
+  reference: Uint8Array;
+}
+
+export function serializePaymentBody(b: PaymentBody): Uint8Array {
+  if (b.amount < 0n) throw new Error('amount must not be negative');
+  return new Writer().u8(b.op).u64(b.amount).varString(b.tokenId).varString(b.memo).varBytes(b.reference).finish();
+}
+
+export function parsePaymentBody(bytes: Uint8Array): PaymentBody {
+  const r = new Reader(bytes);
+  const out = {
+    op: r.u8(),
+    amount: r.u64(),
+    tokenId: r.varString(),
+    memo: r.varString(),
+    reference: r.varBytes().slice(),
+  };
+  r.assertDone();
+  return out;
+}
+
 export const ContactOp = { REQUEST: 1, ACCEPT: 2, DECLINE: 3 } as const;
 
 export interface ContactBody {

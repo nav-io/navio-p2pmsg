@@ -185,3 +185,22 @@ describe('chat bodies', () => {
     }
   });
 });
+
+describe('payment bodies', () => {
+  it('round trips a request and a receipt', async () => {
+    const { parsePaymentBody, serializePaymentBody, PaymentOp } = await import('./frame.js');
+    const request = { op: PaymentOp.REQUEST, amount: 100n, tokenId: '', memo: 'coffee', reference: new Uint8Array(0) };
+    expect(parsePaymentBody(serializePaymentBody(request))).toEqual(request);
+    const sent = { op: PaymentOp.SENT, amount: 2n ** 40n, tokenId: 'tok', memo: '', reference: randomBytes(32) };
+    expect(parsePaymentBody(serializePaymentBody(sent))).toEqual(sent);
+  });
+
+  it('refuses a negative amount and trailing bytes', async () => {
+    const { parsePaymentBody, serializePaymentBody, PaymentOp } = await import('./frame.js');
+    expect(() =>
+      serializePaymentBody({ op: PaymentOp.SENT, amount: -1n, tokenId: '', memo: '', reference: new Uint8Array(0) }),
+    ).toThrow(/negative/);
+    const bytes = serializePaymentBody({ op: 1, amount: 1n, tokenId: '', memo: '', reference: new Uint8Array(0) });
+    expect(() => parsePaymentBody(new Uint8Array([...bytes, 0]))).toThrow(/trailing/);
+  });
+});

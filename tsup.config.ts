@@ -10,6 +10,7 @@ export default defineConfig({
     'archive/index': 'src/archive/index.ts',
     'chat/index': 'src/chat/index.ts',
     'devices/index': 'src/devices/index.ts',
+    'backup/index': 'src/backup/index.ts',
     'bus/pow-worker': 'src/bus/pow-worker.ts',
   },
   format: ['esm', 'cjs'],

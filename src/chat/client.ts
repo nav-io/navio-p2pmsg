@@ -24,6 +24,10 @@ import {
   parseChatFrame,
   parseContactBody,
   parseProfileBody,
+  parsePaymentBody,
+  type PaymentBody,
+  PaymentOp,
+  serializePaymentBody,
   parseReceiptBody,
   type ProfileBody,
   serializeProfileBody,
@@ -39,7 +43,7 @@ import {
 import { ChatStore, type MessageView, type StoredMessage } from './store.js';
 import { USER_DATA_KIND, serializeUserMsgFrame } from '../usermsg/frame.js';
 import { randomBytes } from '../common/bytes.js';
-import { fmdFlag, parseClueKey } from '../bus/fmd.js';
+import { extractDetectionKey, fmdFlag, parseClueKey } from '../bus/fmd.js';
 import { deriveGroupEpoch, type GroupEpochKeys, randomEpochSecret } from './group/schedule.js';
 import {
   GroupRole,
@@ -81,6 +85,8 @@ export type ChatEvents = {
   request: ContactRequest;
   /** A contact published a new display name, status or avatar. */
   profile: { identity: string; profile: ProfileBody };
+  /** A payment request or receipt. The application decides what to do with it. */
+  payment: { from: string; convId: Uint8Array; payment: PaymentBody };
   /** Group membership or metadata changed. */
   group: { groupId: Uint8Array; state: GroupState };
   /**
@@ -193,6 +199,48 @@ export class ChatClient extends Emitter<ChatEvents> {
   }
 
   /** Mark everything currently known in a conversation as read. */
+  /**
+   * Ask a contact for a payment. Carries no keys and touches no chain — an
+   * application wires the amount to a wallet itself.
+   */
+  async requestPayment(to: string, amount: bigint, opts: { tokenId?: string; memo?: string } = {}): Promise<Uint8Array> {
+    return this.sendFrame(
+      to,
+      ChatFrameType.PAYMENT,
+      serializePaymentBody({
+        op: PaymentOp.REQUEST,
+        amount,
+        tokenId: opts.tokenId ?? '',
+        memo: opts.memo ?? '',
+        reference: new Uint8Array(0),
+      }),
+    );
+  }
+
+  /**
+   * Tell a contact a payment was made. `reference` is the output hash — note
+   * navio-core returns one of those rather than a txid, so it is what the
+   * recipient can actually look up.
+   */
+  async notifyPaymentSent(
+    to: string,
+    amount: bigint,
+    reference: Uint8Array,
+    opts: { tokenId?: string; memo?: string } = {},
+  ): Promise<Uint8Array> {
+    return this.sendFrame(
+      to,
+      ChatFrameType.PAYMENT,
+      serializePaymentBody({
+        op: PaymentOp.SENT,
+        amount,
+        tokenId: opts.tokenId ?? '',
+        memo: opts.memo ?? '',
+        reference,
+      }),
+    );
+  }
+
   async markRead(to: string): Promise<void> {
     const convId = this.conversationWith(to);
     const dag = await this.dagFor(convId);
@@ -283,6 +331,16 @@ export class ChatClient extends Emitter<ChatEvents> {
       for (const head of heads) {
         const rendered = view.messages.find((v) => toHex(v.id) === toHex(head));
         if (rendered) this.emit('update', { convId: frame.convId, message: rendered });
+      }
+      return;
+    }
+
+    if (frame.type === ChatFrameType.PAYMENT) {
+      if (!(await this.isKnown(m.from))) return;
+      try {
+        this.emit('payment', { from: m.from, convId: frame.convId, payment: parsePaymentBody(frame.body) });
+      } catch {
+        // Malformed body from a newer or broken peer: ignore.
       }
       return;
     }
@@ -579,6 +637,62 @@ export class ChatClient extends Emitter<ChatEvents> {
     return { rekeyed, needsAdmin };
   }
 
+  /**
+   * Hand ownership to another member, who must already be an admin.
+   *
+   * Separate from `promote` because it is the one change that cannot be
+   * undone by the person making it: afterwards they are an admin like any
+   * other, and only the new owner can transfer it again.
+   */
+  async transferOwnership(groupId: Uint8Array, to: string): Promise<GroupState> {
+    return this.groupOp(groupId, { kind: 'transferOwnership', identity: decodeIdentity(to) });
+  }
+
+  /**
+   * Admit someone who presented a request-to-join invite.
+   *
+   * That invite carries no secret, so it grants nothing on its own — which is
+   * what makes it safe to post where it might be forwarded. An admin turning
+   * it into membership is the whole point.
+   */
+  async admitToGroup(groupId: Uint8Array, identity: string): Promise<GroupState> {
+    return this.groupOp(groupId, { kind: 'add', identity: decodeIdentity(identity) });
+  }
+
+  /** A request-to-join `navinv1…`: shareable, and useless without an admin. */
+  async createJoinRequestInvite(groupId: Uint8Array, ttlSeconds = 24 * 3600): Promise<string> {
+    const state = await this.groupState(groupId);
+    if (!state) throw new Error('unknown group');
+    return encodeInvite(
+      signInvite(
+        {
+          version: 1,
+          kind: InviteKind.REQUEST_TO_JOIN,
+          groupId,
+          epoch: state.epoch,
+          token: randomBytes(16),
+          expiresAt: BigInt(Math.floor(this.now() / 1000) + ttlSeconds),
+          inviter: decodeIdentity(this.client.identity),
+        },
+        this.client.keyring.requireIdentitySecret().sk,
+      ),
+    );
+  }
+
+  /**
+   * Catch up on group messages that arrived while we were offline.
+   *
+   * Queries once per group epoch we hold: a rekey changes the group's clue
+   * key, so a single detection key would silently miss everything sent under
+   * the others.
+   */
+  async syncGroupArchives(precision = 8): Promise<number> {
+    const keys = await this.groupDetectionKeys(precision);
+    let accepted = 0;
+    for (const key of keys) accepted += await this.client.syncArchiveWith(key, precision);
+    return accepted;
+  }
+
   /** `navinv1…` carrying the current epoch secret. Whoever holds it can join. */
   async createInvite(groupId: Uint8Array, ttlSeconds = 24 * 3600): Promise<string> {
     const state = await this.groupState(groupId);
@@ -720,6 +834,29 @@ export class ChatClient extends Emitter<ChatEvents> {
 
   private async epochSecret(groupId: Uint8Array, epoch: number): Promise<Uint8Array | undefined> {
     return this.store.get(NS, `group/${toHex(groupId)}/epoch/${epoch.toString(16).padStart(8, '0')}`);
+  }
+
+  /**
+   * Detection keys for every group epoch we hold, at `precision`.
+   *
+   * A rekey changes the group's clue key, so catching up across one means
+   * querying with the detection key of each epoch involved — a single key
+   * would silently miss everything sent under the others.
+   */
+  async groupDetectionKeys(precision = 8): Promise<Uint8Array[]> {
+    const out: Uint8Array[] = [];
+    for (const state of await this.groups()) {
+      const prefix = `group/${toHex(state.groupId)}/epoch/`;
+      for (const e of await this.store.list(NS, prefix)) {
+        const epoch = parseInt(e.key.slice(prefix.length), 16);
+        try {
+          out.push(extractDetectionKey(deriveGroupEpoch(e.value, epoch).fmd, precision));
+        } catch {
+          // Unreadable epoch record: skip it rather than fail the sync.
+        }
+      }
+    }
+    return out;
   }
 
   private async epochKeys(groupId: Uint8Array, epoch: number): Promise<GroupEpochKeys | undefined> {

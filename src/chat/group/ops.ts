@@ -23,6 +23,8 @@ export type GroupOp =
   | { kind: 'remove'; identity: Uint8Array }
   | { kind: 'leave'; identity: Uint8Array }
   | { kind: 'promote'; identity: Uint8Array; role: number }
+  /** Hand ownership to an existing admin. Only the owner may do it. */
+  | { kind: 'transferOwnership'; identity: Uint8Array }
   | { kind: 'rename'; name: string }
   | { kind: 'setTopic'; topic: string }
   /**
@@ -127,6 +129,19 @@ export function applyGroupOp(
     }
     case 'rekey': {
       requireAdmin(state, author.identity);
+      break;
+    }
+    case 'transferOwnership': {
+      if (self.role !== GroupRole.OWNER) throw new Error('only the owner may transfer ownership');
+      const target = members.find((m) => toHex(m.identity) === toHex(op.identity));
+      if (!target) throw new Error('not a member');
+      if (target.role !== GroupRole.ADMIN) throw new Error('ownership can only pass to an admin');
+      target.role = GroupRole.OWNER;
+      // The outgoing owner stays an admin: demoting them to member in the same
+      // step could leave a group nobody can administer if the new owner is
+      // unreachable.
+      const outgoing = members.find((m) => toHex(m.identity) === toHex(author.identity));
+      if (outgoing) outgoing.role = GroupRole.ADMIN;
       break;
     }
   }

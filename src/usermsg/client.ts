@@ -475,6 +475,28 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    * bandwidth and a larger anonymity set, and the maximum tells the archiving
    * node almost exactly which messages are ours. Default 8.
    */
+  /**
+   * Run an archive sync with a detection key that is not this account's own —
+   * a group's, for instance. Returns how many envelopes the bus accepted.
+   */
+  async syncArchiveWith(detectionKey: Uint8Array, precision: number, limit?: number): Promise<number> {
+    const pool = this.pool;
+    if (!(pool instanceof PeerPool)) return 0;
+    const archive = new ArchiveClient({
+      pool,
+      bus: this.bus,
+      store: this.store,
+      precision,
+      powBits: this.bus.powBits,
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    try {
+      return (await archive.sync(detectionKey)).accepted;
+    } finally {
+      archive.close();
+    }
+  }
+
   async syncArchive(opts: { precision?: number; limit?: number } = {}): Promise<SyncResult> {
     const pool = this.pool;
     if (!(pool instanceof PeerPool)) {

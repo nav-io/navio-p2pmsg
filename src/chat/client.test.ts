@@ -4,7 +4,9 @@ import { MemoryStore } from '../stores/memory-store.js';
 import { Emitter } from '../net/emitter.js';
 import { toHex } from '../common/bytes.js';
 import { ChatClient, type ChatEvents } from './client.js';
-import { decodeInvite } from './group/invite.js';
+import { decodeInvite, InviteKind } from './group/invite.js';
+import { GroupRole, memberOf } from './group/state.js';
+import { decodeIdentity } from '../usermsg/bundle.js';
 
 type NetEvents = {
   message: { peerId: string; stem: boolean; payload: Uint8Array };
@@ -518,4 +520,103 @@ describe('group rekey after device revocation', () => {
     await a.chat.sendGroupText(groupId, 'after rotation');
     expect((await got).message.text).toBe('after rotation');
   }, 60000);
+});
+
+describe('group ownership and join requests', () => {
+  async function ownedGroup(seed: number) {
+    const hub = new Hub();
+    const a = await mk(hub, seed);
+    const b = await mk(hub, seed + 1);
+    await a.client.addContact(b.client.bundle());
+    await b.client.addContact(a.client.bundle());
+    await a.chat.markKnown(b.chat.identity);
+    await b.chat.markKnown(a.chat.identity);
+    const joined = waitFor(b.chat, 'group');
+    const groupId = await a.chat.createGroup('owned', [b.chat.identity]);
+    await joined;
+    return { hub, a, b, groupId };
+  }
+
+  it('transfers ownership only to an admin, and only from the owner', async () => {
+    const { a, b, groupId } = await ownedGroup(120);
+    const bIdentity = decodeIdentity(b.chat.identity);
+
+    // B is a plain member: ownership cannot jump the admin step.
+    await expect(a.chat.transferOwnership(groupId, b.chat.identity)).rejects.toThrow(/admin/);
+    await a.chat.groupOp(groupId, { kind: 'promote', identity: bIdentity, role: GroupRole.ADMIN });
+
+    // And a non-owner cannot transfer it at all.
+    await expect(b.chat.transferOwnership(groupId, b.chat.identity)).rejects.toThrow(/owner/);
+
+    const state = await a.chat.transferOwnership(groupId, b.chat.identity);
+    expect(memberOf(state, bIdentity)!.role).toBe(GroupRole.OWNER);
+    // The outgoing owner stays an admin, so the group is never left without
+    // anyone who can administer it.
+    expect(memberOf(state, decodeIdentity(a.chat.identity))!.role).toBe(GroupRole.ADMIN);
+  }, 60000);
+
+  it('issues a request-to-join invite that grants nothing on its own', async () => {
+    const { a, groupId } = await ownedGroup(124);
+    const text = await a.chat.createJoinRequestInvite(groupId);
+    const invite = decodeInvite(text);
+    expect(invite.kind).toBe(InviteKind.REQUEST_TO_JOIN);
+    // No secret: safe to post somewhere it might be forwarded.
+    expect(invite.epochSecret).toBeUndefined();
+    expect(invite.token).toHaveLength(16);
+  }, 60000);
+
+  it('admits someone who presented a join request', async () => {
+    const { hub, a, groupId } = await ownedGroup(128);
+    const c = await mk(hub, 140);
+    await a.client.addContact(c.client.bundle());
+    await c.client.addContact(a.client.bundle());
+    await a.chat.markKnown(c.chat.identity);
+    await c.chat.markKnown(a.chat.identity);
+
+    const joined = waitFor(c.chat, 'group');
+    await a.chat.admitToGroup(groupId, c.chat.identity);
+    const ev = await joined;
+    expect(memberOf(ev.state, decodeIdentity(c.chat.identity))).toBeDefined();
+
+    const got = waitFor(c.chat, 'message', (e) => e.message.text === 'welcome');
+    await a.chat.sendGroupText(groupId, 'welcome');
+    await got;
+  }, 60000);
+
+  it('offers a detection key per group epoch, so a rekey is not a blind spot', async () => {
+    // A rekey changes the group's clue key. Querying an archive with only the
+    // current one would silently miss everything sent under the previous.
+    const { a, groupId } = await ownedGroup(132);
+    expect(await a.chat.groupDetectionKeys(4)).toHaveLength(1);
+    await a.chat.groupOp(groupId, { kind: 'rekey' });
+    expect((await a.chat.groupState(groupId))!.epoch).toBe(1);
+    expect(await a.chat.groupDetectionKeys(4)).toHaveLength(2);
+  }, 60000);
+});
+
+describe('payments in a conversation', () => {
+  it('carries a request and a receipt without touching a wallet', async () => {
+    // Message types only: this package has no chain dependency, which is the
+    // reason it exists.
+    const hub = new Hub();
+    const a = await mk(hub, 150);
+    const b = await mk(hub, 151);
+    await a.client.addContact(b.client.bundle());
+    await b.client.addContact(a.client.bundle());
+    await a.chat.markKnown(b.chat.identity);
+    await b.chat.markKnown(a.chat.identity);
+
+    const asked = waitFor(b.chat, 'payment');
+    await a.chat.requestPayment(b.chat.identity, 12345n, { memo: 'lunch' });
+    const req = await asked;
+    expect(req.payment.amount).toBe(12345n);
+    expect(req.payment.memo).toBe('lunch');
+    expect(req.from).toBe(a.chat.identity);
+
+    const reference = new Uint8Array(32).fill(7);
+    const paid = waitFor(a.chat, 'payment', (e) => e.payment.reference.length > 0);
+    await b.chat.notifyPaymentSent(a.chat.identity, 12345n, reference);
+    const receipt = await paid;
+    expect(receipt.payment.reference).toEqual(reference);
+  }, 40000);
 });

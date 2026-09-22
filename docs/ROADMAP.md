@@ -204,12 +204,19 @@ been later.
   about who is on the other end.
 
 Still open in M4:
-- Revocation beyond the key rotation: publishing the revocation record and
-  rekeying the groups the device belonged to. `rotateAccountEpoch()` already
-  locks a device out of the next epoch; what is missing is telling the other
-  devices and the groups.
+- ✅ **Revocation.** `revokeDevice()` rotates the account epoch, republishes
+  the device list without the device, and hands the new secret to every device
+  that remains — each reachable at its own device key, which is the only key it
+  still holds once the shared inbox key has moved. A peer refuses a device list
+  whose `accountEpoch` goes backwards, so replaying the list from before a
+  revocation cannot re-admit the device.
+- Group rekey on revocation. The account epoch moves, but the groups the
+  revoked device belonged to keep their own epoch until an admin rotates them.
 - State sync: contacts, group epochs, read state, and the batched
   sent-message mirror.
+- The grace window. The previous prekey stays decryptable so in-flight messages
+  are not lost, which means a revoked device can still read that window;
+  applications should say so, and an immediate cut-off is not yet offered.
 
 ### M5 — stream layer
 

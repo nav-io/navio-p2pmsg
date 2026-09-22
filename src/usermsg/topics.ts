@@ -7,6 +7,8 @@ import { MSG_ID_BYTES, RESERVED_TOPIC_PREFIX } from './frame.js';
 export const TOPIC_PREKEY_RESPONSE = '_p2pmsg/prekey';
 export const TOPIC_ACK = '_p2pmsg/ack';
 export const TOPIC_PAIR = '_p2pmsg/pair';
+/** Account messages between a primary and its own devices (epoch rotations). */
+export const TOPIC_DEVICE = '_p2pmsg/device';
 /** Default topic for 1:1 application messages when the app gives none. */
 export const TOPIC_DEFAULT = 'msg';
 

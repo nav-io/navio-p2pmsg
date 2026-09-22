@@ -50,7 +50,14 @@ import {
   signDeviceList,
   verifyDeviceList,
 } from '../devices/list.js';
-import { type DeviceIdentity, deviceId, generateDevice, signDeviceCert, verifyDeviceCert } from '../devices/hierarchy.js';
+import {
+  DeviceCaps,
+  type DeviceIdentity,
+  deviceId,
+  generateDevice,
+  signDeviceCert,
+  verifyDeviceCert,
+} from '../devices/hierarchy.js';
 import {
   decodePairingOffer,
   encodePairingOffer,
@@ -70,6 +77,7 @@ import {
   ACK_WHOLE,
   TOPIC_ACK,
   TOPIC_DEFAULT,
+  TOPIC_DEVICE,
   TOPIC_PAIR,
   TOPIC_PREKEY_RESPONSE,
   isReservedTopic,
@@ -214,6 +222,12 @@ export type MessagingEvents = {
    * human confirms it matches.
    */
   pairingRequest: { sas: string; devicePub: Uint8Array; label: string };
+  /**
+   * The account rotated its epoch — usually because a device was revoked.
+   * Every derived key has moved; a device that did not receive this can no
+   * longer read anything new.
+   */
+  accountEpoch: { epoch: number; deviceList: Uint8Array };
   /** This device was granted membership of an account. */
   paired: { accountEpoch: number; accountSecret: Uint8Array; identityPub: Uint8Array; cert: Uint8Array; caps: number; deviceList: Uint8Array };
   /** A verified prekey bundle was learned for a contact. */
@@ -302,6 +316,13 @@ export class MessagingClient extends Emitter<MessagingEvents> {
 
     this.keys = new BusKeys();
     this.keys.setInbox(keyring.prekey.sk, keyring.prekey.pub);
+    if (this.device) {
+      // A secondary is individually addressable at its own device key. The
+      // primary needs that to hand it a new account secret after a rotation —
+      // by then the shared inbox key has moved and this is the only key the
+      // device still holds.
+      this.keys.addSessionKey(this.device.keypair.sk, this.device.keypair.pub);
+    }
     if (keyring.previousPrekey) this.keys.addGraceInbox(keyring.previousPrekey.sk);
 
     const poolOpts: PeerPoolOptions = { network: o.network };
@@ -523,7 +544,20 @@ export class MessagingClient extends Emitter<MessagingEvents> {
         try {
           const list = parseDeviceList(bundle.deviceList);
           if (verifyDeviceList(bundle.identity, list).ok) {
-            await this.contacts.setDeviceList(bundle.identity, bundle.deviceList);
+            // NEVER go backwards. A list is a signed snapshot, so an old one
+            // stays valid forever — replaying the list from before a
+            // revocation would re-admit the revoked device. Only a list whose
+            // accountEpoch is at least what we already hold may replace it.
+            const stored = existing?.deviceList;
+            let acceptable = true;
+            if (stored && stored.length > 0) {
+              try {
+                acceptable = list.accountEpoch >= parseDeviceList(stored).accountEpoch;
+              } catch {
+                acceptable = true; // ours is unreadable; take the new one
+              }
+            }
+            if (acceptable) await this.contacts.setDeviceList(bundle.identity, bundle.deviceList);
           }
         } catch {
           // Malformed list: keep the rest of the bundle, ignore the list.
@@ -767,6 +801,104 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   }
 
 
+
+  /**
+   * Remove a device from the account.
+   *
+   * Rotates the account epoch, so every derived key moves and the removed
+   * device can no longer read anything new, republishes the device list
+   * without it, and hands the new secret to each device that remains.
+   *
+   * Two things worth telling the user rather than hiding: the previous prekey
+   * stays in the grace ring so messages already in flight are not lost, which
+   * means the revoked device can still read THAT window; and revocation is
+   * forward-only — it cannot unread what the device already read.
+   */
+  async revokeDevice(devicePub: Uint8Array): Promise<{ epoch: number; deviceList: Uint8Array }> {
+    if (!this.keyring.isPrimary) throw new Error('only the primary device can revoke devices');
+    if (this.keyring.deviceList.length === 0) throw new Error('this account has no device list');
+    const current = parseDeviceList(this.keyring.deviceList);
+    const target = toHex(devicePub);
+    const remaining = current.devices.filter((d) => toHex(d.devicePub) !== target);
+    if (remaining.length === current.devices.length) throw new Error('that device is not on the list');
+
+    // Rotate FIRST: the new list is only meaningful alongside the epoch it
+    // belongs to, and peers refuse a list whose epoch went backwards.
+    await this.keyring.rotateAccountEpoch();
+    const identity = this.keyring.requireIdentitySecret();
+    const list = signDeviceList(
+      { version: DEVICE_LIST_VERSION, accountEpoch: this.keyring.epoch, devices: remaining },
+      identity.sk,
+    );
+    const deviceList = serializeDeviceList(list);
+    this.keyring.deviceList = deviceList;
+
+    // Hand the new secret to the devices that are still ours. Each is reachable
+    // at its own device key, which is why a secondary registers that key.
+    for (const d of remaining) {
+      if (toHex(d.devicePub) === toHex(identity.pub)) continue;
+      await this.sendAccountEpoch(d.devicePub, d.cert, d.caps, deviceList);
+    }
+    this.emit('accountEpoch', { epoch: this.keyring.epoch, deviceList });
+    return { epoch: this.keyring.epoch, deviceList };
+  }
+
+  /** Send the current account epoch to one of our own devices. */
+  private async sendAccountEpoch(
+    devicePub: Uint8Array,
+    cert: Uint8Array,
+    caps: number,
+    deviceList: Uint8Array,
+  ): Promise<void> {
+    const identity = this.keyring.requireIdentitySecret();
+    const payload = serializeGrant({
+      accountEpoch: this.keyring.epoch,
+      accountSecret: this.keyring.accountSecret(),
+      identityPub: identity.pub,
+      cert,
+      caps,
+      deviceList,
+    });
+    const inner = signAuthFrame(
+      { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), payload },
+      identity,
+      TOPIC_DEVICE,
+      devicePub,
+    );
+    const body = serializeUserMsgFrame({ topic: TOPIC_DEVICE, body: inner });
+    await this.bus.send(USER_DATA_KIND, devicePub, body, { stem: true });
+  }
+
+  /** The primary rotated the account epoch and sent us the new secret. */
+  private onAccountEpoch(frame: AuthFrame): void {
+    if (!this.device || !frame.sender) return;
+    // Only our own account's identity may move our keys.
+    if (toHex(frame.sender) !== toHex(this.device.identityPub)) return;
+    let grant;
+    try {
+      grant = parseGrant(frame.payload);
+    } catch {
+      return;
+    }
+    if (toHex(grant.identityPub) !== toHex(this.device.identityPub)) return;
+    // A device that was just revoked must not be able to follow the rotation,
+    // so check we are still on the list this message carries.
+    try {
+      const list = parseDeviceList(grant.deviceList);
+      if (!verifyDeviceList(grant.identityPub, list).ok) return;
+      if (!isListedDevice(list, this.device.keypair.pub)) return;
+    } catch {
+      return;
+    }
+    try {
+      this.keyring.adoptAccountEpoch(grant.accountSecret, grant.accountEpoch);
+    } catch {
+      return; // stale or backwards: ignore
+    }
+    this.keys.setInbox(this.keyring.prekey.sk, this.keyring.prekey.pub);
+    this.emit('accountEpoch', { epoch: grant.accountEpoch, deviceList: grant.deviceList });
+  }
+
   // -------------------------------------------------------------------- pairing
 
   /**
@@ -850,14 +982,36 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     };
 
     // Keep whatever devices were already listed; this one joins them.
-    let devices: DeviceEntry[] = [entry];
+    let devices: DeviceEntry[] = [];
     if (this.keyring.deviceList.length > 0) {
       try {
-        devices = [...parseDeviceList(this.keyring.deviceList).devices, entry];
+        devices = parseDeviceList(this.keyring.deviceList).devices;
       } catch {
         // Unreadable list: start a fresh one rather than refuse to pair.
       }
     }
+    if (devices.length === 0) {
+      // The primary lists ITSELF first. Its "device key" is the identity key,
+      // which is what signs its frames. Without this the list would become
+      // empty — and therefore invalid — the moment the last secondary is
+      // revoked, and there would be nothing left to authenticate the account's
+      // own messages against.
+      devices = [
+        {
+          deviceId: deviceId(identity.pub),
+          devicePub: identity.pub,
+          createdAt,
+          caps: DeviceCaps.PRIMARY | DeviceCaps.CAN_PAIR,
+          label: 'primary',
+          cert: signDeviceCert(identity.sk, {
+            devicePub: identity.pub,
+            createdAt,
+            caps: DeviceCaps.PRIMARY | DeviceCaps.CAN_PAIR,
+          }),
+        },
+      ];
+    }
+    devices = [...devices, entry];
     const list = signDeviceList(
       { version: DEVICE_LIST_VERSION, accountEpoch: this.keyring.epoch, devices },
       identity.sk,
@@ -968,7 +1122,8 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const sharedBound = m.sessionPub !== undefined && this.sharedKeys.has(toHex(m.sessionPub));
     const recipientForSig =
       scope === 'broadcast' ? BROADCAST_RECIPIENT
-      : topic === TOPIC_PREKEY_RESPONSE || topic === TOPIC_PAIR ? (m.sessionPub ?? BROADCAST_RECIPIENT)
+      : topic === TOPIC_PREKEY_RESPONSE || topic === TOPIC_PAIR || topic === TOPIC_DEVICE ?
+        (m.sessionPub ?? BROADCAST_RECIPIENT)
       : sharedBound ? m.sessionPub!
       : this.keyring.identity.pub;
     if (!verifyAuthFrame(frame, topic, recipientForSig)) return;
@@ -977,13 +1132,20 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     // the answer is the sender's published device list — without which a
     // revoked device would still verify against its own key.
     if (frame.devicePub && frame.sender && !(await this.deviceIsListed(frame.sender, frame.devicePub))) return;
-    if (frame.sender && equal(frame.sender, this.keyring.identity.pub) && scope !== 'broadcast') return; // our own echo
+    // Our own echo. Compare the key that SIGNED the frame against the key this
+    // device signs with — not against the account identity, which a secondary
+    // shares with the primary and would therefore mistake every message from
+    // it for an echo of its own.
+    const ourSigner = this.device ? this.device.keypair.pub : this.keyring.identity.pub;
+    const frameSigner = frame.devicePub ?? frame.sender;
+    if (frameSigner && equal(frameSigner, ourSigner) && scope !== 'broadcast') return;
 
     if (topic.startsWith(TOPIC_PREKEY_RESPONSE + '/')) return this.onPrekeyRequest(topic, frame, scope);
     if (topic === TOPIC_PREKEY_RESPONSE) return this.onPrekeyResponse(frame, m);
     if (topic === TOPIC_ACK) return this.onAck(frame, scope);
     if (topic.startsWith(TOPIC_PAIR + '/')) return this.onPairingAnnounce(topic, frame);
     if (topic === TOPIC_PAIR) return this.onPairingGrant(frame);
+    if (topic === TOPIC_DEVICE) return this.onAccountEpoch(frame);
     if (isReservedTopic(topic)) return;
 
     if (frame.sender) {

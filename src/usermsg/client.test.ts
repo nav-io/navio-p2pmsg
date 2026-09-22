@@ -544,3 +544,100 @@ describe('device pairing over the bus', () => {
     await expect(primary.confirmPairing(generateDevice().pub)).rejects.toThrow(/no pairing request/);
   }, 30000);
 });
+
+describe('device revocation', () => {
+  async function accountWithTwoDevices(hub: Hub, seedByte: number) {
+    const primary = await mk(hub, seedByte);
+    const joining = await mk(hub, seedByte + 1);
+    const { offer } = primary.startPairing();
+    const asked = waitFor(primary, 'pairingRequest');
+    const { device } = await joining.requestPairing(offer, 'phone');
+    const req = await asked;
+    const granted = waitFor(joining, 'paired');
+    await primary.confirmPairing(req.devicePub);
+    const grant = await granted;
+    const secondary = await mk(hub, seedByte + 2, {
+      seed: undefined,
+      grant: { accountSecret: grant.accountSecret, identityPub: grant.identityPub, epoch: grant.accountEpoch },
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+    return { primary, secondary, device };
+  }
+
+  it('rotates the epoch, drops the device from the list, and moves every key', async () => {
+    const hub = new Hub();
+    const { primary, device } = await accountWithTwoDevices(hub, 60);
+    const before = { epoch: primary.keyring.epoch, prekey: toHex(primary.keyring.prekey.pub) };
+
+    const res = await primary.revokeDevice(device.pub);
+    expect(res.epoch).toBe(before.epoch + 1);
+    expect(toHex(primary.keyring.prekey.pub)).not.toBe(before.prekey);
+
+    const list = parseDeviceList(res.deviceList);
+    expect(isListedDevice(list, device.pub)).toBe(false);
+    expect(list.accountEpoch).toBe(res.epoch);
+    expect(verifyDeviceList(primary.keyring.identity.pub, list).ok).toBe(true);
+  }, 40000);
+
+  it('hands the new epoch to the devices that remain', async () => {
+    const hub = new Hub();
+    const { primary } = await accountWithTwoDevices(hub, 64);
+    // Pair a third device so there is a survivor to notify.
+    const joining = await mk(hub, 70);
+    const { offer } = primary.startPairing();
+    const asked = waitFor(primary, 'pairingRequest');
+    const { device: third } = await joining.requestPairing(offer, 'laptop');
+    const req = await asked;
+    const granted = waitFor(joining, 'paired');
+    await primary.confirmPairing(req.devicePub);
+    const grant = await granted;
+    const survivor = await mk(hub, 71, {
+      seed: undefined,
+      grant: { accountSecret: grant.accountSecret, identityPub: grant.identityPub, epoch: grant.accountEpoch },
+      device: { keypair: { sk: third.sk, pub: third.pub }, identityPub: grant.identityPub },
+    });
+
+    // Revoke the first secondary, keeping the third device.
+    const victim = parseDeviceList(primary.keyring.deviceList).devices.find(
+      (d) =>
+        toHex(d.devicePub) !== toHex(third.pub) &&
+        toHex(d.devicePub) !== toHex(primary.keyring.identity.pub),
+    )!;
+    const moved = waitFor(survivor, 'accountEpoch');
+    const res = await primary.revokeDevice(victim.devicePub);
+    const ev = await moved;
+
+    expect(ev.epoch).toBe(res.epoch);
+    // The survivor now derives the same inbox key as the primary again.
+    expect(toHex(survivor.keyring.prekey.pub)).toBe(toHex(primary.keyring.prekey.pub));
+    expect(survivor.keyring.epoch).toBe(res.epoch);
+  }, 60000);
+
+  it('refuses to revoke from a secondary, or to revoke a device that is not listed', async () => {
+    const hub = new Hub();
+    const { primary, secondary } = await accountWithTwoDevices(hub, 74);
+    await expect(secondary.revokeDevice(generateDevice().pub)).rejects.toThrow(/primary/);
+    await expect(primary.revokeDevice(generateDevice().pub)).rejects.toThrow(/not on the list/);
+  }, 40000);
+
+  it('never accepts a device list that goes backwards', async () => {
+    // A signed list stays valid forever, so replaying the one from before a
+    // revocation would re-admit the revoked device.
+    const hub = new Hub();
+    const { primary, device } = await accountWithTwoDevices(hub, 78);
+    const peer = await mk(hub, 81);
+    const identityPub = primary.keyring.identity.pub;
+    const stale = primary.keyring.deviceList;
+    expect(isListedDevice(parseDeviceList(stale), device.pub)).toBe(true);
+
+    await primary.revokeDevice(device.pub);
+    const fresh = primary.keyring.deviceList;
+
+    await peer.contacts.setDeviceList(identityPub, fresh);
+    // Feeding the old list back must not re-admit the device.
+    const current = parseDeviceList(peer.contacts.get(identityPub)!.deviceList!);
+    expect(current.accountEpoch).toBe(parseDeviceList(fresh).accountEpoch);
+    expect(parseDeviceList(stale).accountEpoch).toBeLessThan(current.accountEpoch);
+    expect(isListedDevice(current, device.pub)).toBe(false);
+  }, 40000);
+});

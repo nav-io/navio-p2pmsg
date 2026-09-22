@@ -105,7 +105,7 @@ export class Keyring {
    * Account secret for the current epoch on a device that has no seed. Set
    * only on a secondary.
    */
-  private readonly grantedSecret: Uint8Array | undefined;
+  private grantedSecret: Uint8Array | undefined;
 
   private constructor(
     private readonly seed: Uint8Array | undefined,
@@ -130,6 +130,24 @@ export class Keyring {
     this.identity = deriveIdentity(seed);
     this._prekey = derivePrekey(seed, state.epoch);
     this._previous = state.epoch > 0 ? derivePrekey(seed, state.epoch - 1) : undefined;
+  }
+
+  /**
+   * Adopt an account epoch handed to us by the primary, on a SECONDARY device.
+   *
+   * Used when the account rotates — after a revocation, for instance — since a
+   * secondary cannot derive the new secret itself.
+   */
+  adoptAccountEpoch(accountSecret: Uint8Array, epoch: number): void {
+    if (this.seed) throw new Error('the primary derives its own epochs');
+    if (accountSecret.length !== 32) throw new Error('account secret must be 32 bytes');
+    if (epoch < this.state.epoch) throw new Error('account epoch went backwards');
+    this.grantedSecret = accountSecret.slice();
+    this.state = { epoch, rotatedAt: this.now() };
+    this._prekey = deriveInboxPrekey(accountSecret);
+    this._previous = undefined;
+    this._fmd = undefined;
+    this._clueKey = undefined;
   }
 
   /** True when this device holds the seed, and so can rotate and sign as the account. */

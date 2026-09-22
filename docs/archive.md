@@ -175,8 +175,11 @@ archive.on('progress', ({ scanned, matched, complete }) => {});
 - [x] functional test: offline client retrieves, decoys included, caps enforced
 - [x] regtest end-to-end: send while recipient offline → recipient retrieves
       (`test/functional/p2pmsg_archive.py`)
-- [ ] SDK `./archive`: cursor persistence, multi-peer, relaxed timestamp window
+- [x] SDK `./archive`: cursor persistence, multi-peer, relaxed timestamp window
+- [x] SDK end-to-end against a real archiving naviod
+      (`src/archive/archive.int.test.ts`)
 - [ ] benchmark `FmdTest` to fix the caps in this document on real hardware
+- [ ] BIP324, so the detection key is not exposed on the path
 
 Note the node deliberately never *sends* `getp2pmsgs`: retrieval belongs to the
 client holding the detection key, and a full node already stores its own

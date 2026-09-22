@@ -22,6 +22,20 @@ import { sha256 } from '@noble/hashes/sha256';
 import { Reader, Writer } from '../common/serialize.js';
 
 export const POW_HEADER_SIZE = 98;
+
+/**
+ * PoW header versions.
+ *
+ * v1 committed to the ciphertext alone. v2 commits to the ciphertext AND the
+ * envelope's detection flag, without changing the header's size or layout —
+ * only the meaning of `payloadHash`. See `payloadHash()`. v1 is not accepted on
+ * the wire; the two hashes differ even for an empty flag, so a v1 header can
+ * never be replayed as v2.
+ */
+export const POW_VERSION_LEGACY = 1;
+export const POW_VERSION_FLAGGED = 2;
+/** What this build produces and accepts. */
+export const POW_VERSION_CURRENT = POW_VERSION_FLAGGED;
 export const POW_TIMESTAMP_TOLERANCE_SECONDS = 120;
 /** navio-core default difficulty on mainnet/testnet (`-p2pmsgpowbits`). */
 export const DEFAULT_POW_BITS = 23;
@@ -56,6 +70,25 @@ export function parsePoWHeader(r: Reader): PoWHeader {
   const payloadHash = r.bytes(32).slice();
   const nonce = r.u64();
   return { version, timestamp, kind, sessionEph, payloadHash, nonce };
+}
+
+/**
+ * What `PoWHeader.payloadHash` must carry for a given version, ciphertext hash
+ * and flag. `flag` is the raw wire bytes and may be empty.
+ *
+ * Folding the flag in is what stops a relay stripping it (silently denying the
+ * recipient offline delivery) or rewriting it into a third party's detection
+ * bucket: either would invalidate the stamp.
+ */
+export function payloadHash(version: number, msgHash: Uint8Array, flag: Uint8Array): Uint8Array {
+  if (msgHash.length !== 32) throw new Error('msgHash must be 32 bytes');
+  // v1 bound the ciphertext alone. Kept computable so the distinction is
+  // explicit rather than implied, even though v1 is rejected on the wire.
+  if (version === POW_VERSION_LEGACY) return msgHash;
+  const buf = new Uint8Array(msgHash.length + flag.length);
+  buf.set(msgHash, 0);
+  buf.set(flag, msgHash.length);
+  return sha256(buf);
 }
 
 /** Single SHA256 over the serialised header. */

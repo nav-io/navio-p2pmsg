@@ -7,11 +7,19 @@ import type { Store } from '../stores/store.js';
 import { Reader, Writer } from '../common/serialize.js';
 import { toHex } from '../common/bytes.js';
 import { type Bundle, parseBundle, serializeBundle } from './bundle.js';
+import { FMD_CLUE_KEY_SIZE } from '../bus/fmd.js';
 
 export interface Contact {
   identity: Uint8Array; // 48
   bundle?: Bundle; // verified
   bundleAt?: number; // ms when learned
+  /**
+   * The contact's FMD clue key, if we have learned an extended bundle. With it
+   * we can flag messages to them so they can retrieve them after being
+   * offline; without it delivery still works, it just is not archivable.
+   */
+  clueKey?: Uint8Array; // 1152
+  clueKeyEpoch?: number;
   /** Reply key the contact sent us most recently; use once then drop. */
   nextKey?: Uint8Array; // 48
   nextKeyAt?: number;
@@ -59,6 +67,14 @@ export class Contacts {
     return this.upsert(bundle.identity, (c) => {
       c.bundle = bundle;
       c.bundleAt = this.now();
+    });
+  }
+
+  /** Record a verified clue key (caller verifies fmd_sig first). */
+  setClueKey(identity: Uint8Array, clueKey: Uint8Array, epoch: number): Promise<Contact> {
+    return this.upsert(identity, (c) => {
+      c.clueKey = clueKey.slice();
+      c.clueKeyEpoch = epoch;
     });
   }
 
@@ -114,6 +130,10 @@ function encode(c: Contact): Uint8Array {
   w.u8(c.nextKey ? 1 : 0);
   if (c.nextKey) w.bytes(c.nextKey).i64(BigInt(c.nextKeyAt ?? 0));
   w.i64(BigInt(c.lastSeenAt ?? 0));
+  // Appended after the fields above, so a record written by an older build
+  // still decodes: the reader treats a short record as "no clue key".
+  w.u8(c.clueKey ? 1 : 0);
+  if (c.clueKey) w.bytes(c.clueKey).u32(c.clueKeyEpoch ?? 0);
   return w.finish();
 }
 
@@ -131,6 +151,11 @@ function decode(b: Uint8Array): Contact {
   }
   const seen = Number(r.i64());
   if (seen) c.lastSeenAt = seen;
+  // Records written before clue keys existed simply end here.
+  if (r.remaining > 0 && r.u8() === 1) {
+    c.clueKey = r.bytes(FMD_CLUE_KEY_SIZE);
+    c.clueKeyEpoch = r.u32();
+  }
   r.assertDone();
   return c;
 }

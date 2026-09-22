@@ -12,7 +12,15 @@ import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export const DEFAULT_NAVIOD = process.env.NAVIOD ?? '/Users/alex/dev/navio-p2pmsg-int/build/bin/naviod';
+/**
+ * The daemon the integration tests run against. Must be built from a branch
+ * carrying envelope v2 (navio-core `feat/p2pmsg-envelope-v2-fmd` or later) —
+ * the SDK sends PoW header version 2, which a v1 node rejects outright, so an
+ * older binary fails every test here with no useful message.
+ *
+ * Override with $NAVIOD.
+ */
+export const DEFAULT_NAVIOD = process.env.NAVIOD ?? '/Users/alex/dev/navio-fmd/build/bin/naviod';
 
 export interface RegtestNodeOptions {
   /** Path to the daemon binary. Default `$NAVIOD` or the integration worktree build. */
@@ -70,7 +78,19 @@ const helpCache = new Map<string, Set<string>>();
 export function supportedFlags(binary: string): Set<string> {
   let set = helpCache.get(binary);
   if (set) return set;
-  const help = execFileSync(binary, ['-help', '-help-debug'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  // Point at a scratch datadir: without one the daemon uses the real default
+  // and tries to write settings.json there, so two test files probing -help
+  // concurrently race and one dies with "Settings file could not be written".
+  const tmp = mkdtempSync(join(tmpdir(), 'navio-help-'));
+  let help: string;
+  try {
+    help = execFileSync(binary, ['-help', '-help-debug', `-datadir=${tmp}`], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
   set = new Set<string>();
   for (const m of help.matchAll(/^\s{2}(-[a-zA-Z0-9]+)/gm)) set.add(m[1]!);
   helpCache.set(binary, set);

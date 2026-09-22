@@ -3,28 +3,38 @@ import { describe, expect, it } from 'vitest';
 import { concat, randomBytes } from '../common/bytes.js';
 import { generateSecret, publicKey } from './bls.js';
 import { encrypt, packetMsgHash } from './ecies.js';
-import { type Envelope, MAX_ENVELOPE_BYTES, parseEnvelope, replayKey, serializeEnvelope } from './envelope.js';
-import { grindSync, withNonce } from './pow.js';
+import {
+  type Envelope,
+  expectedPayloadHash,
+  MAX_ENVELOPE_BYTES,
+  MAX_FLAG_BYTES,
+  parseEnvelope,
+  replayKey,
+  serializeEnvelope,
+} from './envelope.js';
+import { FMD_FLAG_SIZE } from './fmd.js';
+import { grindSync, payloadHash, POW_VERSION_CURRENT, withNonce } from './pow.js';
 import { ReplayCache } from './replay-cache.js';
 
-function makeEnvelope(bodyLen = 10, kind = 7): Envelope {
+function makeEnvelope(bodyLen = 10, kind = 7, flag: Uint8Array = new Uint8Array(0)): Envelope {
   const enc = encrypt(publicKey(generateSecret()), randomBytes(bodyLen), new Uint8Array([kind]));
   const pow = {
-    version: 1,
+    version: POW_VERSION_CURRENT,
     timestamp: BigInt(Math.floor(Date.now() / 1000)),
     kind,
     sessionEph: enc.eph,
-    payloadHash: packetMsgHash(enc),
+    payloadHash: payloadHash(POW_VERSION_CURRENT, packetMsgHash(enc), flag),
     nonce: 0n,
   };
-  return { kind, pow, enc };
+  return { kind, pow, flag, enc };
 }
 
 describe('envelope', () => {
   it('round trips: u8 kind || pow(98) || packet', () => {
     const env = makeEnvelope();
     const bytes = serializeEnvelope(env);
-    expect(bytes.length).toBe(1 + 98 + 48 + 1 + 64 + 16);
+    // + 1 for the CompactSize flag length, which is 0 here.
+    expect(bytes.length).toBe(1 + 98 + 1 + 48 + 1 + 64 + 16);
     expect(bytes[0]).toBe(7);
     expect(parseEnvelope(bytes)).toEqual(env);
   });
@@ -38,20 +48,52 @@ describe('envelope', () => {
 
   it('rejects > 4096 bytes and accepts exactly 4096', () => {
     expect(() => parseEnvelope(new Uint8Array(MAX_ENVELOPE_BYTES + 1))).toThrow(/too large/);
-    // body of 3926 bytes => 4 + 3926 = 3930 ct (unpadded) => 1+98+48+3+3930+16 = 4096
-    const env = makeEnvelope(3926);
+    // body of 3925 bytes => 4 + 3925 = 3929 ct (unpadded)
+    // => 1 kind + 98 pow + 1 flen + 48 eph + 3 compactsize + 3929 + 16 tag = 4096
+    const env = makeEnvelope(3925);
     const bytes = serializeEnvelope(env);
     expect(bytes.length).toBe(MAX_ENVELOPE_BYTES);
     expect(parseEnvelope(bytes)).toEqual(env);
   });
 
-  it('replayKey = sha256(kind || MsgHash), independent of nonce', () => {
+  it('carries an optional detection flag, bound by the pow header', () => {
+    const flag = randomBytes(FMD_FLAG_SIZE);
+    const env = makeEnvelope(10, 7, flag);
+    const bytes = serializeEnvelope(env);
+    expect(bytes.length).toBe(1 + 98 + 1 + FMD_FLAG_SIZE + 48 + 1 + 64 + 16);
+    const parsed = parseEnvelope(bytes);
+    expect(parsed.flag).toEqual(flag);
+    expect(parsed).toEqual(env);
+    // The header commits to the flag, so it cannot be stripped or swapped
+    // without redoing the work.
+    expect(expectedPayloadHash({ ...env, flag: new Uint8Array(0) })).not.toEqual(env.pow.payloadHash);
+    const other = randomBytes(FMD_FLAG_SIZE);
+    expect(expectedPayloadHash({ ...env, flag: other })).not.toEqual(env.pow.payloadHash);
+    expect(expectedPayloadHash(env)).toEqual(env.pow.payloadHash);
+  });
+
+  it('rejects a flag above MAX_FLAG_BYTES', () => {
+    const env = makeEnvelope(10, 7, randomBytes(MAX_FLAG_BYTES + 1));
+    expect(() => parseEnvelope(serializeEnvelope(env))).toThrow(/flag too large/);
+  });
+
+  it('replayKey = sha256(kind || payload_hash), independent of nonce', () => {
     const env = makeEnvelope();
-    const expected = sha256(concat(new Uint8Array([env.kind]), packetMsgHash(env.enc)));
+    const expected = sha256(concat(new Uint8Array([env.kind]), env.pow.payloadHash));
     expect(replayKey(env)).toEqual(expected);
     const nonce = grindSync(env.pow, 8)!;
     expect(replayKey({ ...env, pow: withNonce(env.pow, nonce) })).toEqual(expected);
     expect(replayKey({ ...env, kind: 8 })).not.toEqual(expected);
+  });
+
+  it('replayKey separates two flags over the same ciphertext', () => {
+    // Deliberate: it lets a sender re-flag a retransmission for a recipient
+    // whose clue key rotated, and each variant costs a fresh grind.
+    const a = makeEnvelope(10, 7, randomBytes(FMD_FLAG_SIZE));
+    const b = { ...a, flag: randomBytes(FMD_FLAG_SIZE) };
+    b.pow = { ...a.pow, payloadHash: expectedPayloadHash(b) };
+    expect(packetMsgHash(a.enc)).toEqual(packetMsgHash(b.enc));
+    expect(replayKey(a)).not.toEqual(replayKey(b));
   });
 });
 

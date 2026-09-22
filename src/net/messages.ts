@@ -33,6 +33,12 @@ export const ServiceFlags = {
   NODE_P2PMSG: 1n << 24n,
   /** Leaf client: receives fluff, never chosen as stem successor, relays nothing. */
   NODE_P2PMSG_LEAF: 1n << 25n,
+  /**
+   * The peer RETAINS the flagged envelopes it relays and will serve them back
+   * on `getp2pmsgs`, so a client that was offline can catch up through it.
+   * Orthogonal to relaying: an archiving node normally sets NODE_P2PMSG too.
+   */
+  NODE_P2PMSG_ARCHIVE: 1n << 26n,
 } as const;
 
 export function hasService(services: bigint, flag: bigint): boolean {
@@ -50,6 +56,10 @@ export const MessageType = {
   ADDRV2: 'addrv2',
   P2PMSG: 'p2pmsg',
   DP2PMSG: 'dp2pmsg',
+  // Both fit the 12-byte command field. A longer name is silently dead on the
+  // wire — navio-core's own `getoutputdata` (13 chars) is the cautionary tale.
+  GETP2PMSGS: 'getp2pmsgs',
+  P2PMSGS: 'p2pmsgs',
 } as const;
 
 // ---------------------------------------------------------------------------

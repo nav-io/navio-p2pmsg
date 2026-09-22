@@ -4,6 +4,7 @@ export * from './pow.js';
 export * from './pow-protocol.js';
 export * from './pow-grinder.js';
 export * from './envelope.js';
+export * from './fmd.js';
 export * from './replay-cache.js';
 export * from './keyring.js';
 export * from './client.js';

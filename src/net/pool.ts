@@ -66,6 +66,8 @@ export type PeerPoolEvents = {
   peerclose: { peerId: string; address: string; error?: Error; wasConnected: boolean };
   /** A `p2pmsg` / `dp2pmsg` envelope from any peer. */
   message: PoolMessage;
+  /** A `p2pmsgs` archive response from a peer we queried. */
+  archive: { peerId: string; payload: Uint8Array };
   /** New address learned via gossip / DNS. */
   addr: { address: string; services: bigint };
   /** Non-fatal errors (dial failures, DNS failures, peer errors). */
@@ -405,6 +407,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
 
     peer.on('addr', (addrs) => this.onGossip(addrs));
     peer.on('message', (m) => this.emit('message', { peerId: id, stem: m.stem, payload: m.payload }));
+    peer.on('archive', (m) => this.emit('archive', { peerId: id, payload: m.payload }));
     peer.on('error', (e) => this.emit('error', new Error(`${id}: ${e.message}`)));
     peer.on('close', (err) => {
       const wasConnected = slot.connected;

@@ -130,11 +130,12 @@ navio-core (done):
 - [x] `OnWire`: v1 rejected, flag size bounded, replay key covers the flag
 - [x] `Transport::Send`: optional flag, v2 stamp
 
-SDK (to do):
+SDK:
 
-- [ ] `src/bus/envelope.ts`: encode/decode `flen`/`flag`
-- [ ] `src/bus/pow.ts`: v2 `payload_hash`, version byte, reject v1
-- [ ] `src/bus/pow-grinder.ts` + `pow-worker.ts`: hash the flag into the job
-- [ ] `src/bus/replay-cache.ts`: key on the new `payload_hash`
-- [ ] `src/net/`: BIP324 transport, negotiation, fallback
-- [ ] shared test vectors with navio-core
+- [x] `src/bus/envelope.ts`: encode/decode `flen`/`flag`, `expectedPayloadHash`
+- [x] `src/bus/pow.ts`: v2 `payloadHash`, version constants, v1 rejected
+- [x] the grinder needed no change — the header is still 98 bytes and the flag
+      is folded into `payloadHash` before grinding starts
+- [x] replay key is now `SHA256(kind ‖ payloadHash)`, covering the flag
+- [x] shared test vectors with navio-core, both directions
+- [ ] `src/net/`: BIP324 transport, negotiation, fallback — **not started**

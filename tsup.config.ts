@@ -7,6 +7,7 @@ export default defineConfig({
     'bus/index': 'src/bus/index.ts',
     'usermsg/index': 'src/usermsg/index.ts',
     'stores/index': 'src/stores/index.ts',
+    'archive/index': 'src/archive/index.ts',
     'bus/pow-worker': 'src/bus/pow-worker.ts',
   },
   format: ['esm', 'cjs'],

@@ -14,7 +14,7 @@ import { concat, equal, randomBytes, toHex } from '../common/bytes.js';
 import type { Store } from '../stores/store.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { snapshotStore, restoreStore, type StoreSnapshot } from '../stores/store.js';
-import { Keyring, verifyBundle } from './keyring.js';
+import { Keyring, verifyBundle, verifyExtendedBundle } from './keyring.js';
 import { Contacts } from './contacts.js';
 import { Outbox, type OutboxEntry } from './outbox.js';
 import { Reassembler, splitChunks } from './chunker.js';
@@ -29,7 +29,20 @@ import {
   serializeAuthFrame,
   serializeUserMsgFrame,
 } from './frame.js';
-import { type Bundle, decodeContact, encodeBundle, encodeIdentity, serializeBundle, parseBundle, BUNDLE_BYTES } from './bundle.js';
+import {
+  type Bundle,
+  decodeContact,
+  encodeBundle,
+  encodeIdentity,
+  type ExtendedBundle,
+  isExtendedBundle,
+  parseAnyBundle,
+  serializeExtendedBundle,
+  BUNDLE_BYTES,
+  EXTENDED_BUNDLE_BYTES,
+} from './bundle.js';
+import { extractDetectionKey, fmdFlag, isValidClueKey, parseClueKey } from '../bus/fmd.js';
+import { ArchiveClient, type SyncResult } from '../archive/client.js';
 import {
   ACK_WHOLE,
   TOPIC_ACK,
@@ -63,6 +76,14 @@ export interface SendOptions {
   sign?: boolean;
   /** Dandelion stem (default true) or plain fluff. */
   stem?: boolean;
+  /**
+   * Attach a detection flag so the recipient can retrieve this message from an
+   * archiving node if they were offline. Default true whenever we hold the
+   * recipient's verified clue key; set false to save 83 bytes per envelope when
+   * offline retrieval does not matter. The flag carries no recipient
+   * identifier — see `../bus/fmd.js`.
+   */
+  archivable?: boolean;
   signal?: AbortSignal;
 }
 
@@ -251,6 +272,63 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   get identityBytes(): Uint8Array {
     return this.keyring.identity.pub;
   }
+  /**
+   * Our FMD clue key (1152 bytes): what a sender needs in order to flag a
+   * message so we can retrieve it from an archiving node after being offline.
+   * Published automatically over prekey discovery; exposed here for apps that
+   * distribute contact details out of band. Public, safe to share.
+   */
+  clueKey(): Uint8Array {
+    return this.keyring.fmdClueKey();
+  }
+
+  /**
+   * Detection key at false-positive rate `2^-precision`, for querying an
+   * archiving node.
+   *
+   * SECRET, and long-lived: whoever holds it can test every future flag at this
+   * precision until the prekey rotates. Lower precision means more decoys, more
+   * bandwidth and a larger anonymity set; the maximum tells the holder exactly
+   * which messages are ours. The choice is deliberately the caller's.
+   */
+  detectionKey(precision: number): Uint8Array {
+    return extractDetectionKey(this.keyring.fmd, precision);
+  }
+
+  /**
+   * Retrieve messages that arrived while we were offline, from connected peers
+   * advertising `NODE_P2PMSG_ARCHIVE`. Resolves to what was fetched; retrieved
+   * messages surface through the ordinary `message` event, so an application
+   * does not have to treat them specially.
+   *
+   * Requires a `PeerPool` (the default). Returns zero peers when the network
+   * was supplied by the application or no archiving peer is connected.
+   *
+   * `precision` is the false-positive exponent: lower means more decoys, more
+   * bandwidth and a larger anonymity set, and the maximum tells the archiving
+   * node almost exactly which messages are ours. Default 8.
+   */
+  async syncArchive(opts: { precision?: number; limit?: number } = {}): Promise<SyncResult> {
+    const pool = this.pool;
+    if (!(pool instanceof PeerPool)) {
+      return { received: 0, accepted: 0, complete: true, peers: 0 };
+    }
+    const precision = opts.precision ?? 8;
+    const archive = new ArchiveClient({
+      pool,
+      bus: this.bus,
+      store: this.store,
+      precision,
+      powBits: this.bus.powBits,
+      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    });
+    try {
+      return await archive.sync(this.detectionKey(precision));
+    } finally {
+      archive.close();
+    }
+  }
+
   /** Full contact bundle, `navmsg1…` (identity + current prekey + signature). */
   bundle(): string {
     return encodeBundle(this.keyring.bundle());
@@ -307,12 +385,36 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     return encodeIdentity(identity);
   }
 
-  private async learnBundle(bundle: Bundle): Promise<void> {
+  private async learnBundle(bundle: Bundle | ExtendedBundle): Promise<void> {
     if (!verifyBundle(bundle)) throw new Error('bundle signature invalid');
     const existing = this.contacts.get(bundle.identity);
     const changed = !existing?.bundle || !equal(existing.bundle.prekey, bundle.prekey);
     await this.contacts.setBundle(bundle);
+    if (isExtendedBundle(bundle)) {
+      // Verify the clue key under the same identity before storing it:
+      // flagging to a substituted clue key would hand the retrieval side to
+      // whoever substituted it. A bad signature costs us only the clue key, so
+      // keep the prekey and fall back to unflagged sends.
+      if (verifyExtendedBundle(bundle) && isValidClueKey(bundle.fmdClueKey)) {
+        await this.contacts.setClueKey(bundle.identity, bundle.fmdClueKey, bundle.fmdEpoch);
+      }
+    }
     if (changed) this.emit('contact', { identity: encodeIdentity(bundle.identity), bundle: encodeBundle(bundle) });
+  }
+
+  /**
+   * A fresh detection flag for `identity`, or undefined when we hold no
+   * verified clue key for them (in which case the message is delivered
+   * normally but cannot be retrieved later).
+   */
+  private flagFor(identity: Uint8Array): Uint8Array | undefined {
+    const clueKey = this.contacts.get(identity)?.clueKey;
+    if (!clueKey) return undefined;
+    try {
+      return fmdFlag(parseClueKey(clueKey));
+    } catch {
+      return undefined;
+    }
   }
 
   /** Find a contact's current prekey bundle over the bus. */
@@ -372,11 +474,21 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     });
     if (opts.sign === false) {
       // Unsigned: fire and forget — nobody can ack an anonymous sender.
-      await this.transmit(entry, { sign: false, stem: opts.stem ?? true, signal: opts.signal });
+      await this.transmit(entry, {
+        sign: false,
+        stem: opts.stem ?? true,
+        ...(opts.archivable !== undefined ? { archivable: opts.archivable } : {}),
+        signal: opts.signal,
+      });
       await this.outbox.remove(entry.msgId);
       return entry.msgId;
     }
-    await this.transmit(entry, { sign: true, stem: opts.stem ?? true, signal: opts.signal });
+    await this.transmit(entry, {
+      sign: true,
+      stem: opts.stem ?? true,
+      ...(opts.archivable !== undefined ? { archivable: opts.archivable } : {}),
+      signal: opts.signal,
+    });
     return entry.msgId;
   }
 
@@ -446,7 +558,10 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     return pub;
   }
 
-  private async transmit(entry: OutboxEntry, o: { sign: boolean; stem: boolean; signal?: AbortSignal }): Promise<void> {
+  private async transmit(
+    entry: OutboxEntry,
+    o: { sign: boolean; stem: boolean; archivable?: boolean; signal?: AbortSignal },
+  ): Promise<void> {
     const key = toHex(entry.msgId);
     if (this.inflight.has(key)) return;
     this.inflight.add(key);
@@ -457,7 +572,10 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     }
   }
 
-  private async transmitInner(entry: OutboxEntry, o: { sign: boolean; stem: boolean; signal?: AbortSignal }): Promise<void> {
+  private async transmitInner(
+    entry: OutboxEntry,
+    o: { sign: boolean; stem: boolean; archivable?: boolean; signal?: AbortSignal },
+  ): Promise<void> {
     const recipientKey = await this.recipientKey(entry.recipient);
     const replyPub = o.sign ? this.mintReplyKey(entry.recipient) : undefined;
     const pending = this.outbox.pendingChunks(entry);
@@ -471,7 +589,15 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       };
       const inner = o.sign ? signAuthFrame(base, this.keyring.identity, entry.topic, entry.recipient) : serializeAuthFrame(base);
       const body = serializeUserMsgFrame({ topic: entry.topic, body: inner });
-      const peers = await this.bus.send(USER_DATA_KIND, recipientKey, body, { stem: o.stem, ...(o.signal ? { signal: o.signal } : {}) });
+      // A fresh flag per envelope: the ephemeral element is regenerated each
+      // time, so chunks and retries of the same message are unlinkable to each
+      // other on the wire.
+      const flag = o.archivable === false ? undefined : this.flagFor(entry.recipient);
+      const peers = await this.bus.send(USER_DATA_KIND, recipientKey, body, {
+        stem: o.stem,
+        ...(flag ? { flag } : {}),
+        ...(o.signal ? { signal: o.signal } : {}),
+      });
       this.emit('sent', { msgId: entry.msgId, chunk: idx, attempt: entry.attempts + 1, peers: typeof peers === 'number' ? peers : this.pool.connectedCount });
     }
     await this.outbox.markSent(entry.msgId);
@@ -609,7 +735,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (this.now() - last < 10_000) return;
     this.lastPrekeyReply.set(k, this.now());
     if (this.lastPrekeyReply.size > 1024) this.lastPrekeyReply.clear();
-    const bundleBytes = serializeBundle(this.keyring.bundle());
+    // Answer with the EXTENDED bundle: the clue key is what lets the requester
+    // flag messages to us, and discovery is the only place it is published.
+    const bundleBytes = serializeExtendedBundle(this.keyring.extendedBundle());
     const inner = signAuthFrame(
       { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), payload: bundleBytes },
       this.keyring.identity,
@@ -622,8 +750,15 @@ export class MessagingClient extends Emitter<MessagingEvents> {
 
   private async onPrekeyResponse(frame: AuthFrame, m: InboundMessage): Promise<void> {
     if (m.recipient !== 'session' || !m.sessionPub || !frame.sender) return;
-    if (frame.payload.length !== BUNDLE_BYTES) return;
-    const bundle = parseBundle(frame.payload);
+    // Accept either form: a peer on an older build answers with the 192-byte
+    // v1 bundle and simply gives us no clue key.
+    if (frame.payload.length !== BUNDLE_BYTES && frame.payload.length !== EXTENDED_BUNDLE_BYTES) return;
+    let bundle: Bundle | ExtendedBundle;
+    try {
+      bundle = parseAnyBundle(frame.payload);
+    } catch {
+      return;
+    }
     if (!equal(bundle.identity, frame.sender) || !verifyBundle(bundle)) return;
     const key = toHex(bundle.identity);
     const d = this.discoveries.get(key);

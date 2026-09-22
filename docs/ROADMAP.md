@@ -54,18 +54,29 @@ C++ side, both committed in the `navio-fmd` worktree:
   proof of work, caps, per-peer metering. 7 unit tests, one functional test
   running the real offline scenario, doc.
 
+SDK side, done:
+
+- ✅ `src/bus/fmd.ts` — keygen, flag, extract, test, clue-key codec.
+- ✅ Envelope v2 codec, PoW v2 `payloadHash`, replay key over the flag.
+- ✅ Bundle v2 over prekey discovery, so a contact's clue key is learned
+  automatically; `send()` flags whenever one is known.
+- ✅ `src/archive/` — stamp grinder, request/response codecs, `ArchiveClient`,
+  per-peer cursor persistence, `MessagingClient.syncArchive()`.
+- ✅ **Cross-implementation vectors both ways**: a flag made by the SDK tests
+  true in navio-core and vice versa, and the seed→clue-key derivation and the
+  query-stamp pricing are pinned on both sides.
+- ✅ Exit criteria met: `src/archive/archive.int.test.ts` runs the full loop
+  against a real archiving naviod — recipient offline, message flagged and
+  archived, recipient returns and retrieves it.
+
 Still open in M1:
 
+- **BIP324 in the SDK is not started** (decision 26). Until it lands, an
+  archive query hands the detection key to anyone on the path, so a client
+  should only query a node it reaches over a trusted link.
 - Confirm BIP324 works over the #462 WebSocket listener. `WebSocketSock` is a
   `Sock` and v2 transport detection is byte-stream based, so it is expected to
   work unchanged — expectation, not evidence, until a test proves it.
-- SDK: `./fmd` (keygen, flag, extract, test), envelope v2 codec, PoW v2
-  grinder, `./archive` client, BIP324 in `net`.
-- Byte-exact test vectors shared between the SDK and navio-core.
-- Exit criteria: regtest round trip where an SDK client goes offline, a message
-  is flagged and archived, and the client reconnects over BIP324 and retrieves
-  it. The C++ half of that is already proven by
-  `test/functional/p2pmsg_archive.py`.
 
 ### M2 — chat layer
 

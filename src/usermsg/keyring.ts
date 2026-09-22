@@ -14,7 +14,8 @@ import type { Store } from '../stores/store.js';
 import { utf8 } from '../common/bytes.js';
 import { Reader, Writer } from '../common/serialize.js';
 import { publicKey, scalarFromSeed, signAugmented, verifyAugmented } from '../bus/bls.js';
-import type { Bundle } from './bundle.js';
+import { clueKeyOf, type FmdSecretKey, fmdSecretFromSeed, serializeClueKey } from '../bus/fmd.js';
+import { type Bundle, type ExtendedBundle, fmdSigMessage } from './bundle.js';
 
 const SALT = utf8('navio-p2pmsg');
 const NS = 'keys';
@@ -48,6 +49,20 @@ export function verifyBundle(b: Bundle): boolean {
   }
 }
 
+/**
+ * Verify the clue key as well as the prekey. A sender MUST do this before
+ * flagging: flagging to a substituted clue key hands the retrieval side to
+ * whoever substituted it.
+ */
+export function verifyExtendedBundle(b: ExtendedBundle): boolean {
+  if (!verifyBundle(b)) return false;
+  try {
+    return verifyAugmented(b.identity, fmdSigMessage(b.fmdEpoch, b.fmdClueKey), b.fmdSig);
+  } catch {
+    return false;
+  }
+}
+
 export interface KeyringState {
   epoch: number;
   rotatedAt: number; // ms
@@ -58,6 +73,10 @@ export class Keyring {
   private _prekey: KeyPair;
   private _previous: KeyPair | undefined;
   private state: KeyringState;
+  // Derived lazily: building a clue key is gamma point multiplications, and a
+  // client that never flags anything should not pay for it at startup.
+  private _fmd: FmdSecretKey | undefined;
+  private _clueKey: Uint8Array | undefined;
 
   private constructor(
     private readonly seed: Uint8Array,
@@ -107,10 +126,41 @@ export class Keyring {
     };
   }
 
+  /**
+   * The FMD root secret for the current epoch. Rotating with the prekey is
+   * deliberate and matches naviod: a detection key cannot be revoked and keeps
+   * matching future flags, so its reach has to be bounded by the epoch.
+   */
+  get fmd(): FmdSecretKey {
+    this._fmd ??= fmdSecretFromSeed(this.seed, this.state.epoch);
+    return this._fmd;
+  }
+
+  /** What a sender needs in order to flag a message to us. 1152 bytes. */
+  fmdClueKey(): Uint8Array {
+    this._clueKey ??= serializeClueKey(clueKeyOf(this.fmd));
+    return this._clueKey;
+  }
+
+  /** The bundle plus the clue key, signed — what discovery answers with. */
+  extendedBundle(): ExtendedBundle {
+    const clueKey = this.fmdClueKey();
+    return {
+      ...this.bundle(),
+      fmdEpoch: this.state.epoch,
+      fmdClueKey: clueKey,
+      fmdSig: signAugmented(this.identity.sk, fmdSigMessage(this.state.epoch, clueKey)),
+    };
+  }
+
   async rotatePrekey(): Promise<KeyPair> {
     this._previous = this._prekey;
     this.state = { epoch: this.state.epoch + 1, rotatedAt: this.now() };
     this._prekey = derivePrekey(this.seed, this.state.epoch);
+    // The clue key rotates with the prekey, so detection keys handed out under
+    // the previous one stop matching.
+    this._fmd = undefined;
+    this._clueKey = undefined;
     await this.persist();
     return this._prekey;
   }

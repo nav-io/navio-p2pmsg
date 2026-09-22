@@ -57,6 +57,16 @@
         "types": "./dist/stores/index.d.cts",
         "default": "./dist/stores/index.cjs"
       }
+    },
+    "./archive": {
+      "import": {
+        "types": "./dist/archive/index.d.ts",
+        "default": "./dist/archive/index.js"
+      },
+      "require": {
+        "types": "./dist/archive/index.d.cts",
+        "default": "./dist/archive/index.cjs"
+      }
     }
   },
   "files": [

@@ -64,6 +64,8 @@ export type PeerEvents = {
   connected: PeerVersionInfo;
   /** A `p2pmsg` / `dp2pmsg` envelope. */
   message: PeerMessage;
+  /** A `p2pmsgs` response to an archive query. */
+  archive: { payload: Uint8Array };
   /** Parsed `addr` / `addrv2` entries (one event per message). */
   addr: NetAddress[];
   /** A `pong` matching an outstanding ping; value is the round-trip time in ms. */
@@ -273,6 +275,13 @@ export class Peer extends Emitter<PeerEvents> {
       case MessageType.DP2PMSG:
         if (!this.connected) return;
         this.emit('message', { stem: m.command === MessageType.DP2PMSG, payload: m.payload });
+        return;
+      case MessageType.P2PMSGS:
+        // Response to an archive query we sent. Unsolicited ones are the
+        // caller's problem to ignore; the archive client matches them to an
+        // outstanding request.
+        if (!this.connected) return;
+        this.emit('archive', { payload: m.payload });
         return;
       default:
         // inv, headers, sendcmpct, wtxidrelay, feefilter, ... : not our business.

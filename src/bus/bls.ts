@@ -113,6 +113,50 @@ export function isInfinityG1(bytes: Uint8Array): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Low-level G1 / Fr helpers. Used by the fuzzy-message-detection scheme, which
+// needs raw group arithmetic rather than the key/ECDH abstractions above.
+
+/** Compressed `G * k`. `k` is reduced mod r; k == 0 gives the point at infinity. */
+export function g1MulBase(k: bigint): Uint8Array {
+  const n = ((k % BLS_ORDER) + BLS_ORDER) % BLS_ORDER;
+  return (n === 0n ? G1.ZERO : G1.BASE.multiply(n)).toBytes(true);
+}
+
+/** Compressed `P * k` for a compressed `P`. Throws if `P` is not a valid encoding. */
+export function g1Mul(point: Uint8Array, k: bigint): Uint8Array {
+  const p = G1.fromBytes(point);
+  const n = ((k % BLS_ORDER) + BLS_ORDER) % BLS_ORDER;
+  // noble rejects multiply(0) and multiplying the identity, both of which are
+  // legitimate here (a hashed scalar can be zero, however unlikely).
+  if (n === 0n || p.equals(G1.ZERO)) return G1.ZERO.toBytes(true);
+  return p.multiply(n).toBytes(true);
+}
+
+/** Compressed `A + B`. */
+export function g1Add(a: Uint8Array, b: Uint8Array): Uint8Array {
+  return G1.fromBytes(a).add(G1.fromBytes(b)).toBytes(true);
+}
+
+/**
+ * Reduce a big-endian byte string mod r, matching navio-core's
+ * `BlstScalar::SetVch` (`blst_scalar_from_be_bytes`). Feeding it 64 bytes makes
+ * the result statistically uniform; 32 would be measurably biased.
+ */
+export function frFromBytesWide(b: Uint8Array): bigint {
+  return bytesToBigint(b) % BLS_ORDER;
+}
+
+/** 32-byte big-endian encoding of a scalar, as navio-core serialises Fr. */
+export function frToBytes(n: bigint): Uint8Array {
+  return bigintToScalar(((n % BLS_ORDER) + BLS_ORDER) % BLS_ORDER);
+}
+
+/** Modular inverse in Fr. Throws on zero. */
+export function frInv(n: bigint): bigint {
+  return Fr.inv(((n % BLS_ORDER) + BLS_ORDER) % BLS_ORDER);
+}
+
 /** ECDH: compressed encoding of `pub * sk` (48 bytes). Throws on invalid `pub`. */
 export function ecdh(sk: Uint8Array, pub: Uint8Array): Uint8Array {
   const p = G1.fromBytes(pub);

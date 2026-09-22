@@ -7,7 +7,12 @@ identity, addressing, end-to-end encryption, reliable 1:1 delivery and public
 pub/sub on top of the bus. A chat app is one consumer; the library is not the
 chat app.
 
-Requires Navio nodes running nav-io/navio-core PRs #423 (user messaging), #461 (`NODE_P2PMSG_LEAF`) and, for browsers, #462 (`-p2pwsbind`). Until those are deployed on mainnet, use regtest/testnet nodes built from those branches.
+Requires Navio nodes running nav-io/navio-core #474 (envelope v2 + fuzzy message
+detection), #475 (envelope archive, for offline delivery) and, for browsers,
+#462 (`-p2pwsbind`). #423 (user messaging) and #461 (`NODE_P2PMSG_LEAF`) are
+already on master. **Envelope v2 is a wire break**: this SDK sends PoW header
+version 2, which a node without #474 rejects outright. Until those are deployed
+on mainnet, use regtest/testnet nodes built from those branches.
 
 See `DESIGN.md` for the wire spec, the layer design and the C++ prerequisites
 (`NODE_P2PMSG_LEAF` service bit, `-p2pwsbind` WebSocket listener).
@@ -51,6 +56,10 @@ await client.send('navid1…', utf8('hello'));
 
 client.subscribe('news', (m) => console.log('news:', fromUtf8(m.payload)));
 await client.publish('news', utf8('hello world'));
+
+// Catch up on anything that arrived while this client was offline. Needs a
+// connected peer advertising NODE_P2PMSG_ARCHIVE.
+await client.syncArchive({ precision: 8 });
 ```
 
 ## What the library does for you
@@ -66,8 +75,12 @@ await client.publish('news', utf8('hello world'));
 - **Forward secrecy (lite)**: every message carries a fresh single-use reply
   key; replies ride it instead of the static prekey.
 - **Reliable delivery**: signed batched acks; unacked messages are re-sent
-  with backoff until acked or the TTL expires. No offline delivery — both
-  sides must be online at some overlapping time.
+  with backoff until acked or the TTL expires.
+- **Offline delivery**: messages carry a fuzzy-detection flag, and an archiving
+  node keeps the flagged envelopes it relays. `syncArchive()` retrieves what
+  arrived while you were away. The flag puts **no recipient identifier** on the
+  wire — holding someone's public clue key does not let you test whether a flag
+  is theirs.
 - **Chunking**: payloads above ~3.3 KB are split (default max 16 chunks).
 - **Pub/sub**: public topics readable by every bus participant; reserved
   `_p2pmsg/*` topics carry discovery and acks.
@@ -82,6 +95,7 @@ await client.publish('news', utf8('hello world'));
 | `navio-p2pmsg/bus` | `BusClient`, ECIES, PoW, BLS, envelope — raw access to any `kind` |
 | `navio-p2pmsg/net` | `PeerPool`, `Peer`, TCP/WS transports, P2P codec |
 | `navio-p2pmsg/stores` | `Store` interface, `MemoryStore`, `FileStore`, `IndexedDBStore` |
+| `navio-p2pmsg/archive` | `ArchiveClient`, the `getp2pmsgs`/`p2pmsgs` codecs |
 
 ## Development
 

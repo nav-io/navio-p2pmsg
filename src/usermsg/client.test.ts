@@ -3,6 +3,8 @@ import { MessagingClient, type MessagingEvents, type PeerNetwork } from './clien
 import { MemoryStore } from '../stores/memory-store.js';
 import { Emitter } from '../net/emitter.js';
 import { utf8, fromUtf8 } from '../common/bytes.js';
+import { parseEnvelope } from '../bus/envelope.js';
+import { FMD_FLAG_SIZE, FMD_GAMMA, fmdTest } from '../bus/fmd.js';
 
 type NetEvents = {
   message: { peerId: string; stem: boolean; payload: Uint8Array };
@@ -27,6 +29,8 @@ class Hub {
 
 class FakeNetwork extends Emitter<NetEvents> implements PeerNetwork {
   up = false;
+  /** Every envelope this member put on the wire, for inspection in tests. */
+  sent: Uint8Array[] = [];
   constructor(private hub: Hub) {
     super();
     hub.members.push(this);
@@ -39,6 +43,7 @@ class FakeNetwork extends Emitter<NetEvents> implements PeerNetwork {
     this.up = false;
   }
   broadcast(envelope: Uint8Array, opts: { stem: boolean }): number {
+    this.sent.push(envelope);
     return this.hub.relay(this, envelope, opts.stem);
   }
   medianClockOffset(): number {
@@ -141,6 +146,54 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     await alice.send(bob.identity, utf8('found you'));
     await learned;
     expect(fromUtf8((await got).payload)).toBe('found you');
+  }, 20000);
+
+  it('learns a clue key over discovery and flags later sends', async () => {
+    // Discovery is the only place the clue key is published — it is 1152 bytes
+    // and deliberately not part of the navmsg1… address string. Without it a
+    // message is delivered normally but can never be retrieved after the fact.
+    const hub = new Hub();
+    const net = new FakeNetwork(hub);
+    const alice = await mk(hub, 20, { pool: net });
+    const bob = await mk(hub, 21);
+
+    const learned = waitFor(alice, 'contact', (c) => c.identity === bob.identity);
+    const first = waitFor(bob, 'message');
+    await alice.send(bob.identity, utf8('before discovery'));
+    await learned;
+    expect(fromUtf8((await first).payload)).toBe('before discovery');
+
+    // The first send could not be flagged — the clue key was not known yet.
+    // A later one is, and it tests against Bob's own detection key.
+    net.sent.length = 0;
+    const second = waitFor(bob, 'message');
+    await alice.send(bob.identity, utf8('after discovery'));
+    expect(fromUtf8((await second).payload)).toBe('after discovery');
+
+    const flags = net.sent.map((b) => parseEnvelope(b).flag).filter((f) => f.length > 0);
+    expect(flags.length).toBeGreaterThan(0);
+    for (const flag of flags) {
+      expect(flag.length).toBe(FMD_FLAG_SIZE);
+      expect(fmdTest(bob.detectionKey(FMD_GAMMA), flag)).toBe(true);
+    }
+    // A third party cannot tell the flag is Bob's.
+    const stranger = await mk(hub, 22);
+    expect(fmdTest(stranger.detectionKey(FMD_GAMMA), flags[0]!)).toBe(false);
+  }, 30000);
+
+  it('can send unflagged when offline retrieval does not matter', async () => {
+    const hub = new Hub();
+    const net = new FakeNetwork(hub);
+    const alice = await mk(hub, 23, { pool: net });
+    const bob = await mk(hub, 24);
+    await alice.addContact(bob.bundle());
+    // addContact only carries the v1 bundle, so there is no clue key yet and
+    // nothing to flag with — the send still works.
+    net.sent.length = 0;
+    const got = waitFor(bob, 'message');
+    await alice.send(bob.identity, utf8('hi'), { archivable: false });
+    await got;
+    for (const b of net.sent) expect(parseEnvelope(b).flag.length).toBe(0);
   }, 20000);
 
   it('chunks large payloads and retries until acked', async () => {

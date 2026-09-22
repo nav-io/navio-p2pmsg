@@ -2,17 +2,34 @@
  * BusClient: the leaf's view of the p2pmsg bus. Mirrors navio-core
  * `p2pmsg::Transport` minus relaying (a leaf relays nothing).
  *
- * Inbound (`onWire`): parse -> pow.kind == kind -> payload_hash == MsgHash ->
- * PoW -> timestamp -> replay; then trial-decrypt off the caller's stack and
- * dispatch to the handler registered for the kind.
+ * Inbound (`onWire`): parse -> pow version -> pow.kind == kind ->
+ * payload_hash == SHA256(MsgHash || flag) -> PoW -> timestamp -> replay; then
+ * trial-decrypt off the caller's stack and dispatch to the handler registered
+ * for the kind.
  *
  * Outbound (`send`): encrypt -> PoW header -> grind -> serialise -> sink.
  */
 import { BROADCAST_PUBLIC } from './bls.js';
 import { encrypt, packetMsgHash } from './ecies.js';
-import { type Envelope, MAX_ENVELOPE_BYTES, parseEnvelope, replayKey, serializeEnvelope } from './envelope.js';
+import {
+  type Envelope,
+  expectedPayloadHash,
+  MAX_ENVELOPE_BYTES,
+  MAX_FLAG_BYTES,
+  parseEnvelope,
+  replayKey,
+  serializeEnvelope,
+} from './envelope.js';
 import { type BusKeys, type RecipientClass } from './keyring.js';
-import { checkPoW, checkTimestamp, DEFAULT_POW_BITS, type PoWHeader, POW_TIMESTAMP_TOLERANCE_SECONDS } from './pow.js';
+import {
+  checkPoW,
+  checkTimestamp,
+  DEFAULT_POW_BITS,
+  payloadHash,
+  type PoWHeader,
+  POW_TIMESTAMP_TOLERANCE_SECONDS,
+  POW_VERSION_CURRENT,
+} from './pow.js';
 import { PowGrinder } from './pow-grinder.js';
 import { DEFAULT_REPLAY_CAPACITY, ReplayCache } from './replay-cache.js';
 
@@ -65,7 +82,17 @@ export interface BusSendOptions {
   stem?: boolean;
   signal?: AbortSignal;
   onProgress?: (attempts: number) => void;
+  /**
+   * Detection flag built from the RECIPIENT's clue key (see `./fmd.js`), so a
+   * recipient who is offline can retrieve this message from an archiving node
+   * later. It is bound by the proof of work and carries no recipient
+   * identifier. Omit it if offline retrieval does not matter; the flag costs
+   * 83 bytes of the envelope budget.
+   */
+  flag?: Uint8Array;
 }
+
+const EMPTY_FLAG = new Uint8Array(0);
 
 export interface BusClientOptions {
   keys: BusKeys;
@@ -146,6 +173,23 @@ export class BusClient {
    * dispatch are deferred to the event loop.
    */
   onWire(peerId: unknown, stem: boolean, bytes: Uint8Array): WireResult {
+    return this.ingest(peerId, stem, bytes, /*archived=*/ false);
+  }
+
+  /**
+   * An envelope retrieved from an archiving node rather than received live.
+   *
+   * Identical to `onWire` except that the timestamp window is not enforced: an
+   * archived envelope is old by definition, which is the whole point of
+   * retrieving it. Everything else — PoW, replay, trial decrypt — is unchanged,
+   * so nothing above the bus can tell the difference, and a decoy that fails to
+   * decrypt is dropped exactly like any undecryptable message.
+   */
+  onArchived(peerId: unknown, bytes: Uint8Array): WireResult {
+    return this.ingest(peerId, /*stem=*/ false, bytes, /*archived=*/ true);
+  }
+
+  private ingest(peerId: unknown, stem: boolean, bytes: Uint8Array, archived: boolean): WireResult {
     if (bytes.length > MAX_ENVELOPE_BYTES) return 'invalid';
     let env: Envelope;
     try {
@@ -153,11 +197,14 @@ export class BusClient {
     } catch {
       return 'invalid';
     }
+    // Envelope v2 only, matching navio-core. v1 headers bound the ciphertext
+    // alone, so accepting both would let a v1 stamp be replayed as a v2
+    // envelope with an attacker's flag attached.
+    if (env.pow.version !== POW_VERSION_CURRENT) return 'invalid';
     if (env.pow.kind !== env.kind) return 'badpow';
-    const msgHash = packetMsgHash(env.enc);
-    if (!bytesEqual(env.pow.payloadHash, msgHash)) return 'badpow';
+    if (!bytesEqual(env.pow.payloadHash, expectedPayloadHash(env))) return 'badpow';
     if (!checkPoW(env.pow, this.powBits)) return 'badpow';
-    if (!checkTimestamp(env.pow, this.now(), this.tolerance)) return 'stale';
+    if (!archived && !checkTimestamp(env.pow, this.now(), this.tolerance)) return 'stale';
     if (!this.replay.add(replayKey(env))) return 'replay';
     if (this.closed) return 'accepted';
     this.decryptQueue = this.decryptQueue
@@ -205,17 +252,21 @@ export class BusClient {
   async send(kind: number, recipientPub: Uint8Array, body: Uint8Array, opts: BusSendOptions = {}): Promise<Uint8Array> {
     if (this.closed) throw new Error('BusClient is closed');
     if (kind < 0 || kind > 255 || !Number.isInteger(kind)) throw new Error('kind must be a u8');
+    const flag = opts.flag ?? EMPTY_FLAG;
+    if (flag.length > MAX_FLAG_BYTES) throw new Error('detection flag too large');
     const aad = new Uint8Array([kind]);
     const enc = encrypt(recipientPub, body, aad);
     const header: PoWHeader = {
-      version: 1,
+      version: POW_VERSION_CURRENT,
       timestamp: BigInt(this.now()),
       kind,
       sessionEph: enc.eph,
-      payloadHash: packetMsgHash(enc),
+      // v2 commits to the flag as well, so the work cannot be reused with a
+      // different (or stripped) flag.
+      payloadHash: payloadHash(POW_VERSION_CURRENT, packetMsgHash(enc), flag),
       nonce: 0n,
     };
-    const draft: Envelope = { kind, pow: header, enc };
+    const draft: Envelope = { kind, pow: header, flag, enc };
     const size = serializeEnvelope(draft).length;
     if (size > MAX_ENVELOPE_BYTES) throw new PayloadTooLarge(size);
 
@@ -223,7 +274,7 @@ export class BusClient {
     if (opts.signal) grindOpts.signal = opts.signal;
     if (opts.onProgress) grindOpts.onProgress = opts.onProgress;
     const pow = await this.getGrinder().grind(header, this.powBits, grindOpts);
-    const env: Envelope = { kind, pow, enc };
+    const env: Envelope = { kind, pow, flag, enc };
     const bytes = serializeEnvelope(env);
     // Our own message will be fluffed back to us by peers; pre-mark it seen.
     this.replay.add(replayKey(env));
@@ -236,10 +287,15 @@ export class BusClient {
     return this.send(kind, BROADCAST_PUBLIC, body, opts);
   }
 
-  /** Largest body (bytes) that fits an envelope for this client. */
-  static maxBodyBytes(): number {
-    // 1 kind + 98 pow + 48 eph + 3 compactsize + 16 tag = 166 overhead; ct = 4 + len (unpadded above 3580).
-    return MAX_ENVELOPE_BYTES - 166 - 4;
+  /**
+   * Largest body (bytes) that fits an envelope for this client.
+   * `flagBytes` is the size of the detection flag the send will carry, if any
+   * — it comes out of the same 4096-byte budget.
+   */
+  static maxBodyBytes(flagBytes = 0): number {
+    // 1 kind + 98 pow + 1 flen + 48 eph + 3 compactsize + 16 tag = 167 overhead;
+    // ct = 4 + len (unpadded above 3580).
+    return MAX_ENVELOPE_BYTES - 167 - flagBytes - 4;
   }
 
   private getGrinder(): PowGrinder {

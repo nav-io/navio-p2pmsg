@@ -12,6 +12,7 @@
  * is old by definition. Everything above the bus therefore treats an archived
  * message exactly like a live one.
  */
+import { sha256 } from '@noble/hashes/sha256';
 import type { BusClient } from '../bus/client.js';
 import { FMD_GAMMA } from '../bus/fmd.js';
 import { MessageType, ServiceFlags, hasService } from '../net/messages.js';
@@ -109,13 +110,20 @@ export class ArchiveClient {
    * unrelated id spaces. Querying more than one matters — an archive that omits
    * results is indistinguishable from one with nothing to send, and asking
    * somebody else is the only defence.
+   *
+   * They are also per DETECTION KEY. A cursor records how far this key has
+   * scanned, not how far we have read: a shared cursor would let the first key
+   * queried advance past the whole window and leave every later key resuming
+   * from the end, silently finding nothing. That is exactly the case of
+   * catching up across a group rekey, where each epoch has its own key and the
+   * messages sit behind the cursor the previous epoch just moved.
    */
   async sync(detectionKey: Uint8Array, opts: { maxRounds?: number } = {}): Promise<SyncResult> {
     const maxRounds = opts.maxRounds ?? 20;
     const peers = this.archivePeers();
     const out: SyncResult = { received: 0, accepted: 0, complete: true, peers: peers.length };
     for (const peerId of peers) {
-      let cursor = await this.loadCursor(peerId);
+      let cursor = await this.loadCursor(peerId, detectionKey);
       for (let round = 0; round < maxRounds; round++) {
         const res = await this.queryPeer(peerId, detectionKey, cursor);
         if (!res) {
@@ -129,7 +137,7 @@ export class ArchiveClient {
           if (this.o.bus.onArchived(peerId, item.envelope) === 'accepted') out.accepted++;
         }
         cursor = res.nextCursor;
-        await this.saveCursor(peerId, cursor);
+        await this.saveCursor(peerId, detectionKey, cursor);
         if (res.complete) break;
         if (round === maxRounds - 1) out.complete = false;
       }
@@ -175,8 +183,8 @@ export class ArchiveClient {
     });
   }
 
-  private async loadCursor(peerId: string): Promise<bigint> {
-    const raw = await this.o.store.get(NS, cursorKey(peerId));
+  private async loadCursor(peerId: string, detectionKey: Uint8Array): Promise<bigint> {
+    const raw = await this.o.store.get(NS, cursorKey(peerId, detectionKey));
     if (!raw) return 0n;
     try {
       const r = new Reader(raw);
@@ -187,17 +195,23 @@ export class ArchiveClient {
     }
   }
 
-  private saveCursor(peerId: string, cursor: bigint): Promise<void> {
-    return this.o.store.put(NS, cursorKey(peerId), new Writer().u8(1).u64(cursor).finish());
+  private saveCursor(peerId: string, detectionKey: Uint8Array, cursor: bigint): Promise<void> {
+    return this.o.store.put(NS, cursorKey(peerId, detectionKey), new Writer().u8(1).u64(cursor).finish());
   }
 }
 
 /**
  * Cursors key on the peer's ADDRESS, not its connection id: an id is unique per
  * connection attempt, so keying on it would lose the cursor on every reconnect
- * and re-download the whole window.
+ * and re-download the whole window. They also key on the detection key, so two
+ * keys asking the same archive do not share a position in it.
  */
-function cursorKey(peerId: string): string {
+function cursorKey(peerId: string, detectionKey: Uint8Array): string {
   const hash = peerId.lastIndexOf('#');
-  return hash === -1 ? peerId : peerId.slice(0, hash);
+  const addr = hash === -1 ? peerId : peerId.slice(0, hash);
+  // 8 bytes of the key's hash: enough that two keys never collide in one
+  // store, and short enough to keep the cursor key readable.
+  let tag = '';
+  for (const b of sha256(detectionKey).subarray(0, 8)) tag += b.toString(16).padStart(2, '0');
+  return `${addr}/${tag}`;
 }

@@ -99,6 +99,14 @@ another query from `next_cursor` rather than assume it is caught up — the
 distinction between "you have everything" and "I stopped early" must never be
 ambiguous, or clients silently lose messages.
 
+A cursor belongs to one detection key, not to the client. It records how far
+that key has scanned, and a key that never asked has scanned nothing. Sharing
+one cursor across keys is silent data loss: the first key queried advances it
+past the whole window, and every later key resumes from the end and finds
+nothing. Catching up across a group rekey is exactly that case — each epoch
+has its own detection key, and the messages sit behind the cursor the previous
+epoch just moved. The SDK keys cursors on (peer address, detection key).
+
 Responses are also bounded by a byte cap; a node truncates on whichever limit
 binds first and sets `complete = 0`.
 
@@ -156,8 +164,9 @@ await archive.sync();                      // resume from the persisted cursor
 archive.on('progress', ({ scanned, matched, complete }) => {});
 ```
 
-- Cursor is persisted per archive peer, in the `archive` namespace of the
-  `Store`. Different peers have different id spaces.
+- Cursor is persisted per archive peer and per detection key, in the `archive`
+  namespace of the `Store`. Different peers have different id spaces, and a
+  cursor records how far one key has scanned, not how far the client has read.
 - Query at least two archive peers when available; an archive node that omits
   results is indistinguishable from one with nothing to send, and the only
   defence is asking someone else.

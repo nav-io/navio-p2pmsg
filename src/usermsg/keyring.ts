@@ -3,10 +3,20 @@
  * prekey. Derivation is deterministic from a 32-byte application-supplied
  * seed so a user can recover the same identity on another device.
  *
- *   identity_sk = scalar(HKDF(seed, salt="navio-p2pmsg", info="identity"))
- *   prekey_sk_n = scalar(HKDF(seed, salt="navio-p2pmsg", info="prekey/" + n))
+ *   identity_sk       = scalar(HKDF(seed, salt="navio-p2pmsg", info="identity"))
+ *   account_secret(e) = HKDF(seed, salt="navio-p2pmsg", info="account/" ‖ u32le(e))
+ *   prekey_sk(e)      = scalar(HKDF(account_secret(e), …, info="inbox"))
+ *   fmd_seed(e)       = HKDF(account_secret(e), …, info="fmd")
  *
- * `n` (the prekey epoch) is persisted in Store namespace "keys".
+ * The indirection through an ACCOUNT SECRET is what makes multi-device work.
+ * Every device of an account holds `account_secret(e)` and therefore the same
+ * inbox key, so one envelope reaches all of them and a sender never pays for
+ * the recipient's device count (mainnet proof of work is 23 bits per
+ * envelope). Only the primary device holds the seed, so only it can derive
+ * `e+1` — which is what makes revoking a device mean anything. See
+ * `../devices/hierarchy.js`.
+ *
+ * The epoch `e` is persisted in Store namespace "keys".
  */
 import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -14,6 +24,7 @@ import type { Store } from '../stores/store.js';
 import { utf8 } from '../common/bytes.js';
 import { Reader, Writer } from '../common/serialize.js';
 import { publicKey, scalarFromSeed, signAugmented, verifyAugmented } from '../bus/bls.js';
+import { deriveAccountSecret, deriveFmdSeed, deriveInboxPrekey } from '../devices/hierarchy.js';
 import { clueKeyOf, type FmdSecretKey, fmdSecretFromSeed, serializeClueKey } from '../bus/fmd.js';
 import { type Bundle, type ExtendedBundle, fmdSigMessage } from './bundle.js';
 
@@ -32,8 +43,7 @@ export function deriveIdentity(seed: Uint8Array): KeyPair {
 
 export function derivePrekey(seed: Uint8Array, epoch: number): KeyPair {
   if (!Number.isInteger(epoch) || epoch < 0) throw new Error('bad prekey epoch');
-  const sk = scalarFromSeed(hkdf(sha256, seed, SALT, utf8(`prekey/${epoch}`), 32));
-  return { sk, pub: publicKey(sk) };
+  return deriveInboxPrekey(deriveAccountSecret(seed, epoch));
 }
 
 /** Sign a prekey under the identity exactly like naviod: Sign(identity_sk, prekey_pub bytes). */
@@ -132,8 +142,34 @@ export class Keyring {
    * matching future flags, so its reach has to be bounded by the epoch.
    */
   get fmd(): FmdSecretKey {
-    this._fmd ??= fmdSecretFromSeed(this.seed, this.state.epoch);
+    this._fmd ??= fmdSecretFromSeed(deriveFmdSeed(this.accountSecret()), this.state.epoch);
     return this._fmd;
+  }
+
+  /**
+   * The secret every device of this account shares for the current epoch.
+   *
+   * SECRET, and the thing a pairing grant hands a new device. It deliberately
+   * does NOT include the seed: a secondary device must not be able to derive
+   * the next epoch, or revoking it would achieve nothing.
+   */
+  accountSecret(epoch = this.state.epoch): Uint8Array {
+    return deriveAccountSecret(this.seed, epoch);
+  }
+
+  /**
+   * Rotate the account epoch: revocation.
+   *
+   * Every derived key moves — the inbox prekey, the FMD key and the
+   * deterministic ratchet keys — so a device holding the previous secret stops
+   * being able to read anything new. Only a device with the seed can do this.
+   *
+   * The previous prekey stays in the grace ring, which means a revoked device
+   * can still read that window. Applications should say so when the user
+   * revokes rather than implying a clean cut.
+   */
+  rotateAccountEpoch(): Promise<KeyPair> {
+    return this.rotatePrekey();
   }
 
   /** What a sender needs in order to flag a message to us. 1152 bytes. */

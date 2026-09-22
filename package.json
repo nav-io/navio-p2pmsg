@@ -77,6 +77,16 @@
         "types": "./dist/chat/index.d.cts",
         "default": "./dist/chat/index.cjs"
       }
+    },
+    "./devices": {
+      "import": {
+        "types": "./dist/devices/index.d.ts",
+        "default": "./dist/devices/index.js"
+      },
+      "require": {
+        "types": "./dist/devices/index.d.cts",
+        "default": "./dist/devices/index.cjs"
+      }
     }
   },
   "files": [

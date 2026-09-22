@@ -151,12 +151,43 @@ Still open in M3:
 - Divergent-history conflicts are surfaced as an error; there is no UI-level
   resolution path yet.
 
-### M4 — multi-device
+### M4 — multi-device (foundation done)
 
-Account epochs, device certificates, QR + SAS pairing, device list publication,
-revocation, state sync (contacts, group epochs, read state, sent-message
-mirror). Exit: phone paired to desktop, both receive everything, revoking the
-phone locks it out of the next epoch.
+Done, in `src/devices/`:
+
+- ✅ `hierarchy.ts` — the account-epoch key schedule. `account_secret(e)` is
+  derived from the seed and shared with every device, so one envelope reaches
+  all of them and a sender never pays for the recipient's device count. Only
+  the primary holds the seed, so only it can derive `e+1` — which is what makes
+  revocation mean anything. Also the deterministic receiving ratchet keys,
+  needed so a message decrypts on every device rather than just the one that
+  happened to advance the chain.
+- ✅ `list.ts` — the signed device list. Both the list signature and each
+  device certificate are checked: a valid list signature must not be able to
+  smuggle in a device the identity never admitted.
+- ✅ `pairing.ts` — `navpair1…` offers, the single-use pairing topic derived
+  from a hash of the offer key, the short authentication string both screens
+  show, and the announce/grant bodies. The grant never carries the root seed.
+- ✅ `Keyring` now derives the inbox prekey and the FMD key through the account
+  secret, and `rotateAccountEpoch()` is the revocation primitive.
+
+**Breaking derivation change.** A given seed now produces a different inbox
+prekey and clue key than it did before, because both go through the account
+secret. Nothing is deployed on mainnet, so this is free now and would not have
+been later.
+
+Still open in M4, and the reason a secondary device cannot yet send:
+
+- **Per-device message signing.** Frames are still signed by the identity key,
+  which only the primary holds. A secondary needs to sign with its device key
+  and have the receiver check it against the published device list — an
+  AuthFrame change plus device-list distribution in bundle v2.
+- The live pairing exchange over the bus (the codecs and the SAS exist; the
+  conversation between the two devices does not).
+- Revocation beyond the key rotation: publishing the revocation record and
+  rekeying the groups the device belonged to.
+- State sync: contacts, group epochs, read state, and the batched
+  sent-message mirror.
 
 ### M5 — stream layer
 

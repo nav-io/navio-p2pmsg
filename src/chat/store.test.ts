@@ -212,3 +212,103 @@ describe('ChatStore', () => {
     expect(dag.heads()).toHaveLength(1);
   });
 });
+
+describe('ChatStore read receipts', () => {
+  it('marks a message read by causal ancestry, not by exact id', async () => {
+    // A receipt names only the heads a reader had seen. Reading a later
+    // message must imply everything before it, or every id would have to be
+    // enumerated.
+    const s = mk();
+    const a = text('a', 1);
+    await s.putMessage(a);
+    const b = text('b', 2, ALICE, [a.id]);
+    await s.putMessage(b);
+    const c = text('c', 3, ALICE, [b.id]);
+    await s.putMessage(c);
+
+    await s.setReadBy(CONV, BOB, [b.id]);
+    const view = await s.view(CONV);
+    const byText = new Map(view.messages.map((m) => [m.text, m]));
+    expect(byText.get('a')!.readBy).toEqual([toHex(BOB)]);
+    expect(byText.get('b')!.readBy).toEqual([toHex(BOB)]);
+    // Not yet read past b.
+    expect(byText.get('c')!.readBy).toEqual([]);
+  });
+
+  it('tracks several readers independently', async () => {
+    const s = mk();
+    const a = text('a', 1);
+    await s.putMessage(a);
+    const b = text('b', 2, ALICE, [a.id]);
+    await s.putMessage(b);
+    await s.setReadBy(CONV, BOB, [a.id]);
+    await s.setReadBy(CONV, new Uint8Array(48).fill(3), [b.id]);
+    const view = await s.view(CONV);
+    const byText = new Map(view.messages.map((m) => [m.text, m]));
+    expect(byText.get('a')!.readBy.sort()).toHaveLength(2);
+    expect(byText.get('b')!.readBy).toHaveLength(1);
+  });
+});
+
+describe('ChatStore search', () => {
+  it('finds messages by whole word and by prefix on the last term', async () => {
+    const s = mk();
+    await s.putMessage(text('the quick brown fox', 1));
+    await s.putMessage(text('a slow brown bear', 2));
+    expect(await s.search('fox')).toHaveLength(1);
+    expect(await s.search('brown')).toHaveLength(2);
+    // Last term is a prefix, so search-as-you-type works.
+    expect(await s.search('qui')).toHaveLength(1);
+    // Earlier terms must match whole: every term has to hit.
+    expect(await s.search('brown fox')).toHaveLength(1);
+    expect(await s.search('brown zzz')).toHaveLength(0);
+  });
+
+  it('is case-insensitive and ignores punctuation', async () => {
+    const s = mk();
+    await s.putMessage(text('Hello, World!', 1));
+    expect(await s.search('hello')).toHaveLength(1);
+    expect(await s.search('world')).toHaveLength(1);
+  });
+
+  it('indexes non-latin scripts', async () => {
+    const s = mk();
+    await s.putMessage(text('привет мир', 1));
+    await s.putMessage(text('こんにちは', 2));
+    expect(await s.search('мир')).toHaveLength(1);
+    expect(await s.search('こんにちは')).toHaveLength(1);
+  });
+
+  it('scopes results to a conversation when asked', async () => {
+    const s = mk();
+    await s.putMessage(text('shared word', 1));
+    expect(await s.search('shared', { convId: CONV })).toHaveLength(1);
+    expect(await s.search('shared', { convId: new Uint8Array(32).fill(9) })).toHaveLength(0);
+  });
+
+  it('drops a deleted message from the index', async () => {
+    // An index that still matches deleted text would leak exactly the content
+    // the user asked to remove.
+    const s = mk();
+    const secret = text('pineapple conspiracy', 1);
+    await s.putMessage(secret);
+    expect(await s.search('pineapple')).toHaveLength(1);
+    await s.putMessage(msg(ChatFrameType.DELETE, serializeDeleteBody({ target: secret.id }), 2, ALICE, [secret.id]));
+    expect(await s.search('pineapple')).toHaveLength(0);
+  });
+
+  it('keeps the index when a delete is forged by someone else', async () => {
+    const s = mk();
+    const m = text('durable text', 1, ALICE);
+    await s.putMessage(m);
+    await s.putMessage(msg(ChatFrameType.DELETE, serializeDeleteBody({ target: m.id }), 2, BOB, [m.id]));
+    expect(await s.search('durable')).toHaveLength(1);
+  });
+
+  it('returns nothing for an empty or punctuation-only query', async () => {
+    const s = mk();
+    await s.putMessage(text('something', 1));
+    expect(await s.search('')).toEqual([]);
+    expect(await s.search('!!!')).toEqual([]);
+  });
+});

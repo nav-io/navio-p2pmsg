@@ -184,6 +184,12 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   readonly pool: PeerNetwork;
   readonly bus: BusClient;
   readonly keys: BusKeys;
+  /**
+   * Session keys that are SHARED with more than one party (today: group keys).
+   * Inbound frames encrypted to one of these verify their signature against
+   * the shared key rather than our identity, and are never acked.
+   */
+  private readonly sharedKeys = new Set<string>();
   readonly keyring: Keyring;
   readonly contacts: Contacts;
   readonly outbox: Outbox;
@@ -283,6 +289,16 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   get identityBytes(): Uint8Array {
     return this.keyring.identity.pub;
   }
+  /**
+   * Register a session key that is shared with several parties, such as a
+   * group key. Changes how inbound frames encrypted to it are authenticated —
+   * see `sharedKeys`.
+   */
+  registerSharedKey(sk: Uint8Array, pub: Uint8Array): void {
+    this.keys.addSessionKey(sk, pub);
+    this.sharedKeys.add(toHex(pub));
+  }
+
   /**
    * Our FMD clue key (1152 bytes): what a sender needs in order to flag a
    * message so we can retrieve it from an archiving node after being offline.
@@ -665,11 +681,19 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       return;
     }
     const scope: MessageScope = m.recipient;
-    // Signatures bind the recipient: our identity for 1:1 traffic, zeros for
-    // public topics, and the requester's reply key for prekey responses.
+    // Signatures bind the recipient, so the binding has to match whatever the
+    // sender could actually have known:
+    //   broadcast          zeros — the message is for everyone
+    //   prekey response    the requester's reply key
+    //   shared-key traffic the shared key itself. A sender addressing a GROUP
+    //                      cannot bind to any one member's identity; that is
+    //                      the whole point of one envelope for the group.
+    //   everything else    our identity, which a 1:1 sender does know
+    const sharedBound = m.sessionPub !== undefined && this.sharedKeys.has(toHex(m.sessionPub));
     const recipientForSig =
       scope === 'broadcast' ? BROADCAST_RECIPIENT
       : topic === TOPIC_PREKEY_RESPONSE ? (m.sessionPub ?? BROADCAST_RECIPIENT)
+      : sharedBound ? m.sessionPub!
       : this.keyring.identity.pub;
     if (!verifyAuthFrame(frame, topic, recipientForSig)) return;
     if (frame.sender && equal(frame.sender, this.keyring.identity.pub) && scope !== 'broadcast') return; // our own echo
@@ -688,7 +712,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const seenKey = `${toHex(frame.msgId)}:${frame.sender ? toHex(frame.sender) : '-'}:${frame.chunk?.idx ?? -1}`;
     const duplicate = this.seen.has(seenKey);
     this.remember(seenKey);
-    if (scope !== 'broadcast' && frame.sender) this.queueAck(frame, scope);
+    // No acks for shared-key traffic: every member would ack every message,
+    // turning one envelope into N, each with its own proof of work.
+    if (scope !== 'broadcast' && frame.sender && !sharedBound) this.queueAck(frame, scope);
     if (duplicate) return;
 
     let payload: Uint8Array | undefined = frame.payload;

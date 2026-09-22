@@ -9,6 +9,9 @@
  *                               find its target without scanning
  *   conv/<conv>                 metadata: last activity, last read, unread
  *   gap/<conv>/<id>             a cited parent we do not hold
+ *   read/<conv>/<identity>      how far a contact has read
+ *   term/<term>/<id>            inverted index for search
+ *   tconv/<id>                  id -> conversation, so a search hit can be placed
  *
  * Lamport values are zero-padded hex so lexicographic order is numeric order.
  */
@@ -74,6 +77,18 @@ export interface ConversationMeta {
   unread: number;
 }
 
+/**
+ * Unicode-aware tokeniser for the search index. Splits on anything that is not
+ * a letter or a number, so scripts without spaces still yield their words and
+ * punctuation never becomes part of a term.
+ */
+export function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length > 0);
+}
+
 /** A message as an application should render it, after edits and deletes. */
 export interface MessageView {
   id: Uint8Array;
@@ -95,6 +110,12 @@ export interface MessageView {
   deleted: boolean;
   /** emoji -> identities that reacted, hex-keyed. */
   reactions: Map<string, string[]>;
+  /**
+   * Identities (hex) that have read at least this far. Derived from their read
+   * receipts by causal ancestry, so reading a later message implies everything
+   * before it — a receipt does not have to name every id.
+   */
+  readBy: string[];
 }
 
 export class ChatStore {
@@ -109,6 +130,17 @@ export class ChatStore {
     await this.store.put(NS, `ptr/${idHex}`, new Writer().varString(key).finish());
     // A message we were missing is no longer a gap.
     await this.store.delete(NS, `gap/${convHex}/${idHex}`);
+    if (m.frame.type === ChatFrameType.TEXT) {
+      await this.indexText(m.frame.convId, m.id, parseTextBody(m.frame.body).text);
+    } else if (m.frame.type === ChatFrameType.DELETE) {
+      // Drop the target from the search index as well as from the view: an
+      // index that still matches deleted text would leak exactly the content
+      // the user asked to remove.
+      const target = await this.getMessage(parseDeleteBody(m.frame.body).target);
+      if (target && target.frame.type === ChatFrameType.TEXT && sameSender(target.sender, m.sender)) {
+        await this.unindex(target.id, parseTextBody(target.frame.body).text);
+      }
+    }
     return true;
   }
 
@@ -150,6 +182,80 @@ export class ChatStore {
     w.compactSize(m.readHeads.length);
     for (const h of m.readHeads) w.bytes(h);
     await this.store.put(NS, `conv/${toHex(m.convId)}`, w.finish());
+  }
+
+  /** Record how far `identity` has read, from a RECEIPT frame. */
+  async setReadBy(convId: Uint8Array, identity: Uint8Array, heads: Uint8Array[]): Promise<void> {
+    const w = new Writer().u8(RECORD_VERSION).compactSize(heads.length);
+    for (const h of heads) w.bytes(h);
+    await this.store.put(NS, `read/${toHex(convId)}/${toHex(identity)}`, w.finish());
+  }
+
+  /** identity (hex) -> the heads it last reported reading. */
+  async readState(convId: Uint8Array): Promise<Map<string, Uint8Array[]>> {
+    const prefix = `read/${toHex(convId)}/`;
+    const out = new Map<string, Uint8Array[]>();
+    for (const e of await this.store.list(NS, prefix)) {
+      const r = new Reader(e.value);
+      r.u8();
+      const n = r.compactSize();
+      const heads: Uint8Array[] = [];
+      for (let i = 0; i < n; i++) heads.push(r.bytes(32).slice());
+      out.set(e.key.slice(prefix.length), heads);
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Search
+
+  private async indexText(convId: Uint8Array, id: Uint8Array, text: string): Promise<void> {
+    const idHex = toHex(id);
+    await this.store.put(NS, `tconv/${idHex}`, convId);
+    for (const term of new Set(tokenize(text))) {
+      await this.store.put(NS, `term/${term}/${idHex}`, new Uint8Array(0));
+    }
+  }
+
+  private async unindex(id: Uint8Array, text: string): Promise<void> {
+    const idHex = toHex(id);
+    for (const term of new Set(tokenize(text))) {
+      await this.store.delete(NS, `term/${term}/${idHex}`);
+    }
+  }
+
+  /**
+   * Message ids matching every term in `query`. The last term is matched as a
+   * PREFIX so search-as-you-type works; earlier terms must match whole.
+   */
+  async search(query: string, opts: { convId?: Uint8Array; limit?: number } = {}): Promise<Uint8Array[]> {
+    const terms = tokenize(query);
+    if (terms.length === 0) return [];
+
+    let hits: Set<string> | undefined;
+    for (let i = 0; i < terms.length; i++) {
+      const term = terms[i]!;
+      const last = i === terms.length - 1;
+      const prefix = last ? `term/${term}` : `term/${term}/`;
+      const found = new Set<string>();
+      for (const e of await this.store.list(NS, prefix)) {
+        const slash = e.key.lastIndexOf('/');
+        found.add(e.key.slice(slash + 1));
+      }
+      hits = hits === undefined ? found : new Set([...hits].filter((h) => found.has(h)));
+      if (hits.size === 0) return [];
+    }
+
+    const out: Uint8Array[] = [];
+    for (const idHex of hits ?? []) {
+      if (opts.convId) {
+        const conv = await this.store.get(NS, `tconv/${idHex}`);
+        if (!conv || toHex(conv) !== toHex(opts.convId)) continue;
+      }
+      out.push(fromHex(idHex));
+      if (opts.limit && out.length >= opts.limit) break;
+    }
+    return out;
   }
 
   async recordGap(convId: Uint8Array, missing: Uint8Array): Promise<void> {
@@ -197,6 +303,7 @@ export class ChatStore {
         edited: false,
         deleted: false,
         reactions: new Map(),
+        readBy: [],
       };
       if (m.sender) v.sender = m.sender;
       if (body.replyTo) v.replyTo = body.replyTo;
@@ -248,6 +355,22 @@ export class ChatStore {
         default:
           break;
       }
+    }
+
+    // Read receipts name only the heads a reader had seen, so reading a later
+    // message implies everything causally before it. Walk each reader's
+    // ancestry once rather than expecting receipts to enumerate every id.
+    for (const [who, heads] of await this.readState(convId)) {
+      const seen = new Set<string>();
+      const stack = heads.map((h) => toHex(h));
+      while (stack.length > 0) {
+        const key = stack.pop()!;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const m = byId.get(key);
+        if (m) for (const p of m.frame.parents) stack.push(toHex(p));
+      }
+      for (const key of seen) views.get(key)?.readBy.push(who);
     }
 
     const ordered = dag

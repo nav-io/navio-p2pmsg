@@ -104,24 +104,52 @@ Done, in `src/chat/`:
 - ✅ `client.ts` — `ChatClient`: send, reply, edit, delete, react, read state,
   contact requests, and a local-only blocklist that is never published.
 
+- ✅ Read receipts applied by **causal ancestry**, surfaced as `readBy`: a
+  receipt names only the heads a reader had seen, so reading a later message
+  implies everything before it.
+- ✅ Bundled full-text search (decision 38), Unicode-aware, prefix match on the
+  last term, and a deleted message leaves the index — an index that still
+  matched removed text would leak exactly what the user deleted.
+- ✅ Profiles exchanged on change and automatically on accepting a request.
+
 Still open in M2:
 
-- Read receipts are **sent** but not applied on receipt, so "read by" is not
-  surfaced yet.
-- Bundled full-text search (decision 38).
-- Profile frames are defined but not exchanged automatically.
 - Typing and presence — they belong on the direct channel (decision 34), so
   they wait for M5.
+- The exit criterion below is met by the in-process tests but not yet by two
+  real CLI clients across a restart.
 
 Exit: two CLI clients hold a real conversation with replies, reactions, edits,
 deletes and read state, surviving restart and out-of-order archive replay.
 
-### M3 — groups
+### M3 — groups (core done)
 
-Group key schedule, epochs, membership operations, invites, roles, group FMD
-key, group archive retrieval. Exit: a five-member group survives an add, a
-remove and a rekey, with a removed member provably unable to read the next
-epoch.
+Done, in `src/chat/group/`:
+
+- ✅ `schedule.ts` — one epoch secret derives the group ECIES key (so ONE
+  envelope and ONE proof of work serve the whole group), the group FMD clue key
+  (so group messages are archivable and any member can catch up), and a content
+  key that goes stale for a removed member who recorded ciphertext.
+- ✅ `state.ts` — membership, roles and a **hash chain**: a state that does not
+  chain to the one we hold is rejected and surfaced, which is what makes an
+  admin showing two different histories detectable rather than silent.
+- ✅ `ops.ts` — add / remove / leave / promote / rename, with the rekey policy.
+  Removal always rekeys; without that, removal would mean nothing.
+- ✅ `invite.ts` — `navinv1…`, both key-in-link and request-to-join, with the
+  difference between them documented rather than smoothed over.
+- ✅ `ChatClient` integration: create, send, membership ops, key distribution
+  1:1 over the ratchet, and re-registration of group keys on restart.
+
+Exit criterion met by test: a group survives an add, a remove and a rekey, and
+the removed member provably cannot read the next message.
+
+Still open in M3:
+
+- Group archive retrieval across a rekey boundary (querying with the detection
+  keys of several epochs).
+- Ownership transfer, and admitting a request-to-join invite.
+- Divergent-history conflicts are surfaced as an error; there is no UI-level
+  resolution path yet.
 
 ### M4 — multi-device
 

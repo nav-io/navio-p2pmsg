@@ -23,6 +23,10 @@ import {
   directConversationId,
   parseChatFrame,
   parseContactBody,
+  parseProfileBody,
+  parseReceiptBody,
+  type ProfileBody,
+  serializeProfileBody,
   selfConversationId,
   serializeChatFrame,
   serializeContactBody,
@@ -33,6 +37,22 @@ import {
   serializeTextBody,
 } from './frame.js';
 import { ChatStore, type MessageView, type StoredMessage } from './store.js';
+import { USER_DATA_KIND, serializeUserMsgFrame } from '../usermsg/frame.js';
+import { signAuthFrame } from '../usermsg/auth.js';
+import { randomBytes } from '../common/bytes.js';
+import { fmdFlag, parseClueKey } from '../bus/fmd.js';
+import { deriveGroupEpoch, type GroupEpochKeys, randomEpochSecret } from './group/schedule.js';
+import {
+  GroupRole,
+  type GroupState,
+  memberOf,
+  parseGroupState,
+  serializeGroupState,
+  signGroupState,
+  validateGroupState,
+} from './group/state.js';
+import { applyGroupOp, type GroupOp } from './group/ops.js';
+import { checkInvite, decodeInvite, encodeInvite, type GroupInvite, InviteKind, signInvite } from './group/invite.js';
 
 const NS = 'chatmeta';
 /** Chat rides its own topic prefix so other apps on the bus are unaffected. */
@@ -60,6 +80,10 @@ export type ChatEvents = {
   gap: { convId: Uint8Array; gaps: Gap[] };
   /** First contact from an unknown identity. Not yet in any conversation. */
   request: ContactRequest;
+  /** A contact published a new display name, status or avatar. */
+  profile: { identity: string; profile: ProfileBody };
+  /** Group membership or metadata changed. */
+  group: { groupId: Uint8Array; state: GroupState };
   error: Error;
 };
 
@@ -96,6 +120,7 @@ export class ChatClient extends Emitter<ChatEvents> {
 
   static async create(o: ChatClientOptions): Promise<ChatClient> {
     const c = new ChatClient(o.client, o.store, o.now ?? (() => Date.now()));
+    await c.loadGroups();
     c.unsubscribe = o.client.on('message', (m) => {
       void c.onMessage(m).catch((e: unknown) => c.emit('error', e instanceof Error ? e : new Error(String(e))));
     });
@@ -208,13 +233,50 @@ export class ChatClient extends Emitter<ChatEvents> {
     }
 
     const sender = decodeIdentity(m.from);
-    // The conversation id is derived from the two identities, so a sender
+
+    if (frame.type === ChatFrameType.MEMBERSHIP) {
+      await this.onMembershipFrame(m.from, frame);
+      return;
+    }
+
+    const group = await this.groupState(frame.convId);
+    if (group) {
+      // Group traffic: the sender must be a member, and must have joined no
+      // later than the epoch this message belongs to.
+      if (!memberOf(group, sender)) return;
+      await this.ingest({ id: chatMessageId(frame), sender, frame, receivedAt: this.now() }, /*local=*/ false);
+      return;
+    }
+
+    // The 1:1 conversation id is derived from the two identities, so a sender
     // cannot place a message in someone else's conversation.
     const expected = this.conversationWith(m.from);
     if (toHex(frame.convId) !== toHex(expected)) return;
 
     if (frame.type === ChatFrameType.CONTACT) {
       await this.onContactFrame(m.from, frame);
+      return;
+    }
+
+    if (frame.type === ChatFrameType.RECEIPT) {
+      // Read state, not conversation content: recorded against the sender and
+      // surfaced as `readBy`, never stored as a message.
+      if (!(await this.isKnown(m.from))) return;
+      const heads = parseReceiptBody(frame.body).heads;
+      await this.chat.setReadBy(frame.convId, sender, heads);
+      const view = await this.chat.view(frame.convId);
+      for (const head of heads) {
+        const rendered = view.messages.find((v) => toHex(v.id) === toHex(head));
+        if (rendered) this.emit('update', { convId: frame.convId, message: rendered });
+      }
+      return;
+    }
+
+    if (frame.type === ChatFrameType.PROFILE) {
+      if (!(await this.isKnown(m.from))) return;
+      const profile = parseProfileBody(frame.body);
+      await this.store.put(NS, `profile/${keyOf(m.from)}`, frame.body);
+      this.emit('profile', { identity: m.from, profile });
       return;
     }
 
@@ -286,6 +348,52 @@ export class ChatClient extends Emitter<ChatEvents> {
     return this.chat.meta(convId).then((m) => m.unread);
   }
 
+  /**
+   * Full-text search over stored messages. The last word is matched as a
+   * prefix, so search-as-you-type works.
+   *
+   * The index is derived from plaintext and sits at rest beside the store — on
+   * a stolen device it reveals which words appear in conversations even where
+   * bodies are encrypted. See docs/security.md.
+   */
+  async search(query: string, opts: { convId?: Uint8Array; limit?: number } = {}): Promise<MessageView[]> {
+    const ids = await this.chat.search(query, opts);
+    if (ids.length === 0) return [];
+    const wanted = new Set(ids.map((i) => toHex(i)));
+    const convIds = opts.convId ? [opts.convId] : await this.chat.conversations();
+    const out: MessageView[] = [];
+    for (const convId of convIds) {
+      for (const m of (await this.chat.view(convId)).messages) {
+        if (wanted.has(toHex(m.id)) && !m.deleted) out.push(m);
+      }
+    }
+    return out.sort((a, b) => b.receivedAt - a.receivedAt);
+  }
+
+  /** Our published profile, if we have set one. */
+  async profile(): Promise<ProfileBody | undefined> {
+    const raw = await this.store.get(NS, 'profile/self');
+    return raw ? parseProfileBody(raw) : undefined;
+  }
+
+  /**
+   * Set our profile and publish it to `to`. There is no directory and no
+   * global namespace: a display name is something a contact chose to tell you,
+   * so applications should show the identity alongside it where impersonation
+   * matters.
+   */
+  async setProfile(profile: ProfileBody, to: string[] = []): Promise<void> {
+    const body = serializeProfileBody(profile);
+    await this.store.put(NS, 'profile/self', body);
+    for (const contact of to) await this.sendFrame(contact, ChatFrameType.PROFILE, body);
+  }
+
+  /** The profile a contact last published. */
+  async profileOf(identity: string): Promise<ProfileBody | undefined> {
+    const raw = await this.store.get(NS, `profile/${keyOf(identity)}`);
+    return raw ? parseProfileBody(raw) : undefined;
+  }
+
   /** Pending contact requests, oldest first. */
   async requests(): Promise<ContactRequest[]> {
     const entries = await this.store.list(NS, 'req/');
@@ -303,6 +411,9 @@ export class ChatClient extends Emitter<ChatEvents> {
     await this.markKnown(identity);
     await this.store.delete(NS, `req/${keyOf(identity)}`);
     await this.sendFrame(identity, ChatFrameType.CONTACT, serializeContactBody({ op: ContactOp.ACCEPT, intro: '' }));
+    // Introduce ourselves: a new contact otherwise sees only a navid1… string.
+    const mine = await this.store.get(NS, 'profile/self');
+    if (mine) await this.sendFrame(identity, ChatFrameType.PROFILE, mine);
   }
 
   async declineRequest(identity: string): Promise<void> {
@@ -348,6 +459,242 @@ export class ChatClient extends Emitter<ChatEvents> {
     this.emit('request', { identity, intro, receivedAt });
   }
 
+  // -------------------------------------------------------------------------
+  // Groups
+
+  /**
+   * Create a group. We become the owner; every other member is added in the
+   * same operation and receives the state and the epoch secret 1:1.
+   */
+  async createGroup(name: string, members: string[] = []): Promise<Uint8Array> {
+    const groupId = randomBytes(32);
+    const me = decodeIdentity(this.client.identity);
+    const state = signGroupState(
+      {
+        version: 1,
+        groupId,
+        epoch: 0,
+        members: [
+          { identity: me, role: GroupRole.OWNER, joinedAt: BigInt(Math.floor(this.now() / 1000)), joinedEpoch: 0 },
+          ...members.map((m) => ({
+            identity: decodeIdentity(m),
+            role: GroupRole.MEMBER,
+            joinedAt: BigInt(Math.floor(this.now() / 1000)),
+            joinedEpoch: 0,
+          })),
+        ],
+        name,
+        topic: '',
+        prevStateHash: new Uint8Array(32),
+        author: me,
+      },
+      this.client.keyring.identity.sk,
+    );
+    const secret = randomEpochSecret();
+    await this.adoptGroup(state, secret);
+    for (const m of members) await this.sendGroupKeys(m, state, secret);
+    return groupId;
+  }
+
+  async groupState(groupId: Uint8Array): Promise<GroupState | undefined> {
+    const raw = await this.store.get(NS, `group/${toHex(groupId)}/state`);
+    return raw ? parseGroupState(raw) : undefined;
+  }
+
+  /** Groups we are a member of. */
+  async groups(): Promise<GroupState[]> {
+    const entries = await this.store.list(NS, 'group/');
+    return entries.filter((e) => e.key.endsWith('/state')).map((e) => parseGroupState(e.value));
+  }
+
+  /** Apply a membership or metadata change and distribute the result. */
+  async groupOp(groupId: Uint8Array, op: GroupOp): Promise<GroupState> {
+    const state = await this.groupState(groupId);
+    if (!state) throw new Error('unknown group');
+    const { state: next, rekey } = applyGroupOp(state, op, {
+      identity: decodeIdentity(this.client.identity),
+      sk: this.client.keyring.identity.sk,
+    }, this.now);
+
+    // A rekey mints a fresh secret; anything else keeps the current one, so a
+    // rename does not cost every member a key distribution.
+    const secret = rekey ? randomEpochSecret() : await this.epochSecret(groupId, state.epoch);
+    if (!secret) throw new Error('missing epoch secret for this group');
+    await this.adoptGroup(next, secret);
+
+    const me = toHex(decodeIdentity(this.client.identity));
+    for (const m of next.members) {
+      if (toHex(m.identity) === me) continue;
+      await this.sendGroupKeys(encodeIdentity(m.identity), next, secret);
+    }
+    return next;
+  }
+
+  /** `navinv1…` carrying the current epoch secret. Whoever holds it can join. */
+  async createInvite(groupId: Uint8Array, ttlSeconds = 24 * 3600): Promise<string> {
+    const state = await this.groupState(groupId);
+    if (!state) throw new Error('unknown group');
+    const secret = await this.epochSecret(groupId, state.epoch);
+    if (!secret) throw new Error('missing epoch secret for this group');
+    return encodeInvite(
+      signInvite(
+        {
+          version: 1,
+          kind: InviteKind.KEY_IN_LINK,
+          groupId,
+          epoch: state.epoch,
+          epochSecret: secret,
+          expiresAt: BigInt(Math.floor(this.now() / 1000) + ttlSeconds),
+          inviter: decodeIdentity(this.client.identity),
+        },
+        this.client.keyring.identity.sk,
+      ),
+    );
+  }
+
+  /**
+   * Join from a key-in-link invite. The invite's signature and expiry are
+   * checked, but whether to trust the INVITER is the application's call — the
+   * link is a secret, and anyone who saw it holds the same one.
+   */
+  async joinWithInvite(text: string): Promise<GroupInvite> {
+    const invite = decodeInvite(text);
+    const check = checkInvite(invite, Math.floor(this.now() / 1000));
+    if (!check.ok) throw new Error(check.reason ?? 'invalid invite');
+    if (invite.kind !== InviteKind.KEY_IN_LINK || !invite.epochSecret) {
+      throw new Error('this invite carries no key; ask an admin to admit you');
+    }
+    // Register the key so we can read traffic immediately; the signed state
+    // arrives from an admin and replaces this placeholder knowledge.
+    await this.storeEpochSecret(invite.groupId, invite.epoch, invite.epochSecret);
+    this.registerGroupKeys(deriveGroupEpoch(invite.epochSecret, invite.epoch));
+    return invite;
+  }
+
+  /** Send a message to a group. One envelope, one proof of work, all members. */
+  async sendGroupText(groupId: Uint8Array, text: string, opts: SendTextOptions = {}): Promise<Uint8Array> {
+    const body = serializeTextBody({
+      text,
+      mentions: opts.mentions ?? [],
+      attachments: opts.attachments ?? [],
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+    });
+    return this.sendGroupFrame(groupId, ChatFrameType.TEXT, body);
+  }
+
+  private async sendGroupFrame(groupId: Uint8Array, type: number, body: Uint8Array): Promise<Uint8Array> {
+    const state = await this.groupState(groupId);
+    if (!state) throw new Error('unknown group');
+    const keys = await this.epochKeys(groupId, state.epoch);
+    if (!keys) throw new Error('missing epoch secret for this group');
+
+    const dag = await this.dagFor(groupId);
+    const frame: ChatFrame = {
+      version: 1,
+      type,
+      convId: groupId,
+      timestamp: BigInt(Math.floor(this.now() / 1000)),
+      lamport: dag.nextLamport(),
+      parents: dag.heads(),
+      body,
+    };
+    const id = chatMessageId(frame);
+    await this.ingest(
+      { id, sender: decodeIdentity(this.client.identity), frame, receivedAt: this.now() },
+      /*local=*/ true,
+    );
+
+    const topic = chatTopic(groupId);
+    // Signed by our identity so members can attribute it; addressed to the
+    // group key so only members can open it.
+    const inner = signAuthFrame(
+      { msgId: randomBytes(16), timestamp: BigInt(Math.floor(this.now() / 1000)), payload: serializeChatFrame(frame) },
+      this.client.keyring.identity,
+      topic,
+      keys.eciesPub,
+    );
+    const outer = serializeUserMsgFrame({ topic, body: inner });
+    // Flagged to the GROUP clue key, so any member can retrieve it from an
+    // archive after being offline.
+    await this.client.bus.send(USER_DATA_KIND, keys.eciesPub, outer, {
+      stem: true,
+      flag: fmdFlag(parseClueKey(keys.clueKey)),
+    });
+    return id;
+  }
+
+  private async onMembershipFrame(from: string, frame: ChatFrame): Promise<void> {
+    let parsed: { state: GroupState; epochSecret: Uint8Array };
+    try {
+      parsed = parseMembershipBody(frame.body);
+    } catch {
+      return;
+    }
+    const { state, epochSecret } = parsed;
+    const previous = await this.groupState(state.groupId);
+    const check = validateGroupState(state, previous);
+    if (!check.ok) {
+      // Includes the case that matters most: a state that does not chain to
+      // the one we hold, which means either a missed update or an admin
+      // showing two different histories. Surface it; do not merge it.
+      this.emit('error', new Error(`group state from ${from} rejected: ${check.reason}`));
+      return;
+    }
+    // Only accept membership from someone the previous state says may send it.
+    if (previous && !memberOf(state, decodeIdentity(this.client.identity))) {
+      // We were removed. Keep the state so the UI can say so, but stop here.
+      await this.store.put(NS, `group/${toHex(state.groupId)}/state`, serializeGroupState(state));
+      this.emit('group', { groupId: state.groupId, state });
+      return;
+    }
+    await this.adoptGroup(state, epochSecret);
+  }
+
+  private async adoptGroup(state: GroupState, epochSecret: Uint8Array): Promise<void> {
+    await this.store.put(NS, `group/${toHex(state.groupId)}/state`, serializeGroupState(state));
+    await this.storeEpochSecret(state.groupId, state.epoch, epochSecret);
+    this.registerGroupKeys(deriveGroupEpoch(epochSecret, state.epoch));
+    this.emit('group', { groupId: state.groupId, state });
+  }
+
+  private async sendGroupKeys(to: string, state: GroupState, epochSecret: Uint8Array): Promise<void> {
+    // Distributed 1:1 over the ratchet, which is what makes a rekey O(n) small
+    // messages rather than something the group key could carry.
+    await this.sendFrame(to, ChatFrameType.MEMBERSHIP, serializeMembershipBody(state, epochSecret));
+  }
+
+  private async storeEpochSecret(groupId: Uint8Array, epoch: number, secret: Uint8Array): Promise<void> {
+    await this.store.put(NS, `group/${toHex(groupId)}/epoch/${epoch.toString(16).padStart(8, '0')}`, secret);
+  }
+
+  private async epochSecret(groupId: Uint8Array, epoch: number): Promise<Uint8Array | undefined> {
+    return this.store.get(NS, `group/${toHex(groupId)}/epoch/${epoch.toString(16).padStart(8, '0')}`);
+  }
+
+  private async epochKeys(groupId: Uint8Array, epoch: number): Promise<GroupEpochKeys | undefined> {
+    const secret = await this.epochSecret(groupId, epoch);
+    return secret ? deriveGroupEpoch(secret, epoch) : undefined;
+  }
+
+  private registerGroupKeys(keys: GroupEpochKeys): void {
+    // The bus already trial-decrypts session keys, so a group key needs no new
+    // machinery below this layer — only a note that it is SHARED, so inbound
+    // frames are authenticated against the group key rather than our identity
+    // and are not individually acked.
+    this.client.registerSharedKey(keys.eciesSk, keys.eciesPub);
+  }
+
+  /**
+   * Re-register every group's keys. Called at construction so a restart does
+   * not silently stop decrypting group traffic.
+   */
+  private async loadGroups(): Promise<void> {
+    for (const state of await this.groups()) {
+      const keys = await this.epochKeys(state.groupId, state.epoch);
+      if (keys) this.registerGroupKeys(keys);
+    }
+  }
+
   private async dagFor(convId: Uint8Array): Promise<ConversationDag> {
     const key = toHex(convId);
     let dag = this.dags.get(key);
@@ -380,3 +727,27 @@ function keyOf(identity: string): string {
 }
 
 export { fromUtf8, utf8, encodeIdentity };
+
+// ---------------------------------------------------------------------------
+// Groups
+//
+// A group message is ECIES'd to a MEMBER-ONLY key, not published on a
+// broadcast topic. Broadcast scope encrypts to the generator, so anyone on the
+// bus could read the topic field and watch the group's activity timeline even
+// without the content. Encrypting the envelope to the group key keeps the
+// topic itself secret, and still costs one envelope and one proof of work
+// regardless of how many members there are.
+
+/** Body of a MEMBERSHIP frame: the new state, and the epoch secret it needs. */
+function serializeMembershipBody(state: GroupState, epochSecret: Uint8Array): Uint8Array {
+  return new Writer().u8(1).varBytes(serializeGroupState(state)).bytes(epochSecret).finish();
+}
+
+function parseMembershipBody(bytes: Uint8Array): { state: GroupState; epochSecret: Uint8Array } {
+  const r = new Reader(bytes);
+  if (r.u8() !== 1) throw new Error('unknown membership body version');
+  const state = parseGroupState(r.varBytes());
+  const epochSecret = r.bytes(32).slice();
+  r.assertDone();
+  return { state, epochSecret };
+}

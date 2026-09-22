@@ -12,8 +12,14 @@ import { signAugmented, verifyAugmented } from '../bus/bls.js';
 import { DEVICE_ID_SIZE, deviceId, verifyDeviceCert } from './hierarchy.js';
 
 export const DEVICE_LIST_VERSION = 1;
-export const MAX_DEVICES = 16;
-export const MAX_DEVICE_LABEL_BYTES = 64;
+/**
+ * Bounded so the signed list still fits inside a prekey discovery response,
+ * which also carries the 1152-byte FMD clue key and must stay under
+ * MAX_USER_MSG_BYTES (3584). Eight devices with 32-byte labels leaves
+ * comfortable headroom; sixteen with 64-byte labels would not.
+ */
+export const MAX_DEVICES = 8;
+export const MAX_DEVICE_LABEL_BYTES = 32;
 
 const LIST_TAG = utf8('navio-p2pmsg/device-list/v1');
 

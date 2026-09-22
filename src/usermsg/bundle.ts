@@ -36,14 +36,28 @@ export interface Bundle {
  *   u32      fmd_epoch
  *   u8[1152] fmd_clue_key
  *   u8[96]   fmd_sig        = Sign(identity_sk, u32le(epoch) || clue_key)
+ *   CompactSize n, u8[n]     device_list (may be empty)
+ *
+ * The device list is self-authenticating — it carries its own signature under
+ * the identity key — so it needs no separate signature here.
  */
-export const EXTENDED_BUNDLE_VERSION = 2;
-export const EXTENDED_BUNDLE_BYTES = 1 + 48 + 48 + 96 + 4 + FMD_CLUE_KEY_SIZE + 96;
+export const EXTENDED_BUNDLE_VERSION = 3;
+/** Version 2: everything below except the trailing device list. */
+export const EXTENDED_BUNDLE_V2_BYTES = 1 + 48 + 48 + 96 + 4 + FMD_CLUE_KEY_SIZE + 96;
 
 export interface ExtendedBundle extends Bundle {
   fmdEpoch: number;
   fmdClueKey: Uint8Array; // 1152
   fmdSig: Uint8Array; // 96
+  /**
+   * The account's signed device list, or empty when the account has never
+   * paired a second device.
+   *
+   * Published here because a receiver needs it to verify a DEVICE-signed
+   * frame, and it has to arrive before the first such message rather than
+   * after. See `../devices/list.js`.
+   */
+  deviceList: Uint8Array;
 }
 
 /** The bytes the FMD signature covers. */
@@ -63,28 +77,41 @@ export function serializeExtendedBundle(b: ExtendedBundle): Uint8Array {
     .u32(b.fmdEpoch)
     .bytes(b.fmdClueKey)
     .bytes(b.fmdSig)
+    .varBytes(b.deviceList)
     .finish();
 }
 
 export function parseExtendedBundle(bytes: Uint8Array): ExtendedBundle {
-  if (bytes.length !== EXTENDED_BUNDLE_BYTES) throw new Error(`extended bundle must be ${EXTENDED_BUNDLE_BYTES} bytes`);
   const r = new Reader(bytes);
   const version = r.u8();
-  if (version !== EXTENDED_BUNDLE_VERSION) throw new Error(`unsupported bundle version ${version}`);
-  return {
-    identity: r.bytes(48).slice(),
-    prekey: r.bytes(48).slice(),
-    prekeySig: r.bytes(96).slice(),
-    fmdEpoch: r.u32(),
-    fmdClueKey: r.bytes(FMD_CLUE_KEY_SIZE).slice(),
-    fmdSig: r.bytes(96).slice(),
+  const out: ExtendedBundle = {
+    identity: new Uint8Array(0),
+    prekey: new Uint8Array(0),
+    prekeySig: new Uint8Array(0),
+    fmdEpoch: 0,
+    fmdClueKey: new Uint8Array(0),
+    fmdSig: new Uint8Array(0),
+    deviceList: new Uint8Array(0),
   };
+  if (version !== EXTENDED_BUNDLE_VERSION && version !== 2) {
+    throw new Error(`unsupported bundle version ${version}`);
+  }
+  out.identity = r.bytes(48).slice();
+  out.prekey = r.bytes(48).slice();
+  out.prekeySig = r.bytes(96).slice();
+  out.fmdEpoch = r.u32();
+  out.fmdClueKey = r.bytes(FMD_CLUE_KEY_SIZE).slice();
+  out.fmdSig = r.bytes(96).slice();
+  // Version 2 predates device lists; an older peer simply has none.
+  if (version === EXTENDED_BUNDLE_VERSION) out.deviceList = r.varBytes().slice();
+  r.assertDone();
+  return out;
 }
 
 /**
- * Parse either bundle form. v1 is 192 bytes with no version byte and v2 is
- * 1445 with one, so length alone separates them — an older peer's response
- * stays readable.
+ * Parse whichever bundle form arrived. v1 is exactly 192 bytes and carries no
+ * version byte; v2 and v3 start with one. An older peer's response therefore
+ * stays readable, and a newer one degrades to "no device list".
  */
 export function parseAnyBundle(bytes: Uint8Array): Bundle | ExtendedBundle {
   if (bytes.length === BUNDLE_BYTES) return parseBundle(bytes);

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { MessagingClient, type MessagingEvents, type PeerNetwork } from './client.js';
 import { MemoryStore } from '../stores/memory-store.js';
+import { generateDevice, signDeviceCert } from '../devices/hierarchy.js';
+import { DEVICE_LIST_VERSION, serializeDeviceList, signDeviceList } from '../devices/list.js';
+import { decodeIdentity } from './bundle.js';
 import { Emitter } from '../net/emitter.js';
 import { utf8, fromUtf8 } from '../common/bytes.js';
 import { parseEnvelope } from '../bus/envelope.js';
@@ -249,4 +252,85 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     expect(m.from).toBeUndefined();
     expect(alice.outbox.size).toBe(0);
   });
+});
+
+describe('MessagingClient device-signed frames', () => {
+  it('accepts a listed device and rejects one that was revoked', async () => {
+    // NOTE on the setup: the sending client is given the account seed as well
+    // as a device key, because building a Keyring from a pairing grant alone
+    // is still to come. What is under test is the RECEIVER's decision, which
+    // is genuine: it sees a device-signed frame and consults the device list
+    // it learned from the sender's bundle.
+    const hub = new Hub();
+    const net = new FakeNetwork(hub);
+    const device = generateDevice();
+    const alice = await mk(hub, 30, { pool: net });
+    const bob = await mk(hub, 31);
+
+    const identityPub = decodeIdentity(alice.identity);
+    const createdAt = 1700000000n;
+    const caps = 0;
+    const entry = {
+      deviceId: device.id,
+      devicePub: device.pub,
+      createdAt,
+      caps,
+      label: 'phone',
+      cert: signDeviceCert(alice.keyring.identity.sk, { devicePub: device.pub, createdAt, caps }),
+    };
+    const list = signDeviceList(
+      { version: DEVICE_LIST_VERSION, accountEpoch: 0, devices: [entry] },
+      alice.keyring.identity.sk,
+    );
+    alice.keyring.deviceList = serializeDeviceList(list);
+
+    // Bob learns the list through ordinary prekey discovery.
+    const learned = waitFor(bob, 'contact', (c) => c.identity === alice.identity);
+    await bob.addContact(alice.identity);
+    await alice.addContact(bob.bundle());
+    await bob.send(alice.identity, utf8('ping'));
+    await learned;
+
+    // Now Alice sends as the secondary device.
+    const asDevice = await mk(hub, 30, {
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub },
+    });
+    await asDevice.addContact(bob.bundle());
+    const got = waitFor(bob, 'message', (m) => fromUtf8(m.payload) === 'from my phone');
+    await asDevice.send(bob.identity, utf8('from my phone'));
+    const ev = await got;
+    expect(ev.from).toBe(alice.identity);
+
+    // Revoke the device: publish a list that no longer names it.
+    const replacement = generateDevice();
+    const goodRevoked = signDeviceList(
+      {
+        version: DEVICE_LIST_VERSION,
+        accountEpoch: 1,
+        devices: [
+          {
+            deviceId: replacement.id,
+            devicePub: replacement.pub,
+            createdAt,
+            caps,
+            label: 'laptop',
+            cert: signDeviceCert(alice.keyring.identity.sk, { devicePub: replacement.pub, createdAt, caps }),
+          },
+        ],
+      },
+      alice.keyring.identity.sk,
+    );
+    await bob.contacts.setDeviceList(identityPub, serializeDeviceList(goodRevoked));
+
+    let delivered = false;
+    const off = bob.on('message', (m) => {
+      if (fromUtf8(m.payload) === 'after revocation') delivered = true;
+    });
+    await asDevice.send(bob.identity, utf8('after revocation'));
+    await new Promise((r) => setTimeout(r, 1500));
+    off();
+    // The device key still produces a valid signature; it is simply no longer
+    // one of Alice's devices, which is the whole point of revocation.
+    expect(delivered).toBe(false);
+  }, 40000);
 });

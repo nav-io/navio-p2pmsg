@@ -41,6 +41,16 @@ export const AUTH_FRAME_VERSION = 1;
 export const FLAG_SIGNED = 1 << 0;
 export const FLAG_HAS_REPLY_KEY = 1 << 1;
 export const FLAG_CHUNK = 1 << 2;
+/**
+ * The signature is by a DEVICE key rather than the account's identity key.
+ *
+ * Only the primary device holds the identity key, so a secondary cannot sign
+ * as the account. Instead it signs with its own key and the frame carries that
+ * key; the receiver checks it against the sender's published device list. A
+ * device that was revoked is no longer on the list, so its signatures stop
+ * being accepted — which is the whole point of revocation.
+ */
+export const FLAG_DEVICE_SIGNED = 1 << 3;
 
 export const MSG_ID_BYTES = 16;
 export const PUBKEY_BYTES = 48;
@@ -49,7 +59,12 @@ export const SIG_BYTES = 96;
 export interface AuthFrame {
   msgId: Uint8Array; // 16
   timestamp: bigint; // unix seconds
-  sender?: Uint8Array; // 48, present iff signed
+  sender?: Uint8Array; // 48, present iff signed — the ACCOUNT identity
+  /**
+   * Device key that produced `sig`, present iff FLAG_DEVICE_SIGNED. When
+   * absent the signature is by the identity key itself.
+   */
+  devicePub?: Uint8Array; // 48
   replyPub?: Uint8Array; // 48
   chunk?: { idx: number; total: number };
   payload: Uint8Array;
@@ -61,6 +76,7 @@ function flagsOf(f: AuthFrame): number {
   if (f.sender) flags |= FLAG_SIGNED;
   if (f.replyPub) flags |= FLAG_HAS_REPLY_KEY;
   if (f.chunk) flags |= FLAG_CHUNK;
+  if (f.devicePub) flags |= FLAG_DEVICE_SIGNED;
   return flags;
 }
 
@@ -71,6 +87,11 @@ export function serializeAuthFrameUnsigned(f: AuthFrame): Uint8Array {
   if (f.sender) {
     if (f.sender.length !== PUBKEY_BYTES) throw new Error('sender must be 48 bytes');
     w.bytes(f.sender);
+  }
+  if (f.devicePub) {
+    if (!f.sender) throw new Error('a device-signed frame must name its account identity');
+    if (f.devicePub.length !== PUBKEY_BYTES) throw new Error('devicePub must be 48 bytes');
+    w.bytes(f.devicePub);
   }
   if (f.replyPub) {
     if (f.replyPub.length !== PUBKEY_BYTES) throw new Error('replyPub must be 48 bytes');
@@ -102,6 +123,12 @@ export function parseAuthFrame(bytes: Uint8Array): AuthFrame {
   const timestamp = r.i64();
   const f: AuthFrame = { msgId, timestamp, payload: new Uint8Array(0) };
   if (flags & FLAG_SIGNED) f.sender = r.bytes(PUBKEY_BYTES);
+  if (flags & FLAG_DEVICE_SIGNED) {
+    // Without an account identity there is no device list to check the key
+    // against, so the frame would be unverifiable by construction.
+    if (!(flags & FLAG_SIGNED)) throw new Error('device-signed frame without an identity');
+    f.devicePub = r.bytes(PUBKEY_BYTES);
+  }
   if (flags & FLAG_HAS_REPLY_KEY) f.replyPub = r.bytes(PUBKEY_BYTES);
   if (flags & FLAG_CHUNK) {
     const idx = r.u16();
@@ -129,4 +156,5 @@ export function authFrameDigest(topic: string, recipient: Uint8Array, unsignedFr
 }
 
 /** Overhead of a signed frame carrying a reply key and chunk header, payload excluded. */
-export const AUTH_FRAME_MAX_OVERHEAD = 1 + 1 + MSG_ID_BYTES + 8 + PUBKEY_BYTES + PUBKEY_BYTES + 4 + 3 + SIG_BYTES; // 225
+export const AUTH_FRAME_MAX_OVERHEAD =
+  1 + 1 + MSG_ID_BYTES + 8 + PUBKEY_BYTES + PUBKEY_BYTES + PUBKEY_BYTES + 4 + 3 + SIG_BYTES; // 273, incl. a device key

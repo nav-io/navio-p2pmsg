@@ -278,3 +278,79 @@ describe('pairing', () => {
     expect(() => parseGrant(announce)).toThrow(/not a pairing grant/);
   });
 });
+
+describe('device-signed frames', () => {
+  it('verifies under the device key, and the account list decides the rest', async () => {
+    const { signAuthFrameWithDevice, verifyAuthFrame } = await import('../usermsg/auth.js');
+    const { parseAuthFrame } = await import('../usermsg/frame.js');
+
+    const identitySk = generateSecret();
+    const identityPub = publicKey(identitySk);
+    const device = generateDevice();
+    const recipient = publicKey(generateSecret());
+
+    const bytes = signAuthFrameWithDevice(
+      { msgId: randomBytes(16), timestamp: 1n, payload: new Uint8Array([1, 2, 3]) },
+      identityPub,
+      { sk: device.sk, pub: device.pub },
+      'chat',
+      recipient,
+    );
+    const frame = parseAuthFrame(bytes);
+    expect(frame.sender).toEqual(identityPub);
+    expect(frame.devicePub).toEqual(device.pub);
+    // The signature proves the DEVICE signed it, nothing about the account.
+    expect(verifyAuthFrame(frame, 'chat', recipient)).toBe(true);
+    expect(verifyAuthFrame(frame, 'other-topic', recipient)).toBe(false);
+
+    // Membership is the device list's job — and a revoked device is simply
+    // absent from it, which is the entire mechanism.
+    const caps = 0;
+    const createdAt = 5n;
+    const entry = {
+      deviceId: device.id,
+      devicePub: device.pub,
+      createdAt,
+      caps,
+      label: 'phone',
+      cert: signDeviceCert(identitySk, { devicePub: device.pub, createdAt, caps }),
+    };
+    const list = signDeviceList({ version: DEVICE_LIST_VERSION, accountEpoch: 0, devices: [entry] }, identitySk);
+    expect(verifyDeviceList(identityPub, list).ok).toBe(true);
+    expect(isListedDevice(list, device.pub)).toBe(true);
+
+    const revoked = signDeviceList(
+      { version: DEVICE_LIST_VERSION, accountEpoch: 1, devices: [{ ...entry, devicePub: generateDevice().pub }] },
+      identitySk,
+    );
+    expect(isListedDevice(revoked, device.pub)).toBe(false);
+  });
+
+  it('refuses a device key that the identity never certified', async () => {
+    // The attack this blocks: a stolen device keeps signing valid-looking
+    // frames after it is revoked.
+    const identitySk = generateSecret();
+    const identityPub = publicKey(identitySk);
+    const stolen = generateDevice();
+    const forged = signDeviceList(
+      {
+        version: DEVICE_LIST_VERSION,
+        accountEpoch: 0,
+        devices: [
+          {
+            deviceId: stolen.id,
+            devicePub: stolen.pub,
+            createdAt: 1n,
+            caps: 0,
+            label: 'stolen',
+            cert: signDeviceCert(stolen.sk, { devicePub: stolen.pub, createdAt: 1n, caps: 0 }),
+          },
+        ],
+      },
+      // The attacker can sign the LIST only if they hold the identity key,
+      // which they do not; sign with their own to show the check still fires.
+      stolen.sk,
+    );
+    expect(verifyDeviceList(identityPub, forged).ok).toBe(false);
+  });
+});

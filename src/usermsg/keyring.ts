@@ -178,7 +178,13 @@ export class Keyring {
     return this._clueKey;
   }
 
-  /** The bundle plus the clue key, signed — what discovery answers with. */
+  /**
+   * The account's signed device list, published so peers can verify
+   * device-signed frames. Empty until a second device is paired.
+   */
+  deviceList: Uint8Array = new Uint8Array(0);
+
+  /** The bundle plus the clue key and device list — what discovery answers with. */
   extendedBundle(): ExtendedBundle {
     const clueKey = this.fmdClueKey();
     return {
@@ -186,6 +192,7 @@ export class Keyring {
       fmdEpoch: this.state.epoch,
       fmdClueKey: clueKey,
       fmdSig: signAugmented(this.identity.sk, fmdSigMessage(this.state.epoch, clueKey)),
+      deviceList: this.deviceList,
     };
   }
 

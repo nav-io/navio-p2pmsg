@@ -18,7 +18,7 @@ import { Keyring, verifyBundle, verifyExtendedBundle } from './keyring.js';
 import { Contacts } from './contacts.js';
 import { Outbox, type OutboxEntry } from './outbox.js';
 import { Reassembler, splitChunks } from './chunker.js';
-import { signAuthFrame, verifyAuthFrame } from './auth.js';
+import { signAuthFrame, signAuthFrameWithDevice, verifyAuthFrame } from './auth.js';
 import {
   type AuthFrame,
   BROADCAST_RECIPIENT,
@@ -39,9 +39,9 @@ import {
   parseAnyBundle,
   serializeExtendedBundle,
   BUNDLE_BYTES,
-  EXTENDED_BUNDLE_BYTES,
 } from './bundle.js';
 import { extractDetectionKey, fmdFlag, isValidClueKey, parseClueKey } from '../bus/fmd.js';
+import { isListedDevice, parseDeviceList, verifyDeviceList } from '../devices/list.js';
 import { ArchiveClient, type SyncResult } from '../archive/client.js';
 import {
   ACK_WHOLE,
@@ -131,6 +131,21 @@ export interface MessagingClientOptions {
    * test every future message addressed to us.
    */
   transportVersion?: 'v1' | 'v2' | 'v2-only';
+  /**
+   * Run as a SECONDARY device of an account.
+   *
+   * A secondary holds the account secret (so it decrypts everything the
+   * primary does, from the same single envelope) but not the identity secret,
+   * so it cannot sign as the account. It signs with its own device key
+   * instead, and recipients check that key against the account's published
+   * device list. Supply the grant a pairing produced.
+   */
+  device?: {
+    /** This device's own keypair. Never leaves the device. */
+    keypair: { sk: Uint8Array; pub: Uint8Array };
+    /** The account identity this device belongs to, public key only. */
+    identityPub: Uint8Array;
+  };
   /** Chunks per message before `send` throws. Default 16. */
   maxChunks?: number;
   messageTtlMs?: number;
@@ -191,6 +206,8 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    */
   private readonly sharedKeys = new Set<string>();
   readonly keyring: Keyring;
+  /** Set when this client runs as a secondary device. */
+  private readonly device: MessagingClientOptions['device'];
   readonly contacts: Contacts;
   readonly outbox: Outbox;
   readonly store: Store;
@@ -218,6 +235,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     this.network = o.network;
     this.store = store;
     this.keyring = keyring;
+    this.device = o.device;
     this.contacts = contacts;
     this.outbox = outbox;
     this.now = o.now ?? (() => Date.now());
@@ -425,6 +443,18 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       if (verifyExtendedBundle(bundle) && isValidClueKey(bundle.fmdClueKey)) {
         await this.contacts.setClueKey(bundle.identity, bundle.fmdClueKey, bundle.fmdEpoch);
       }
+      // The device list is self-authenticating, so verify it on its own terms
+      // before trusting any device it names.
+      if (bundle.deviceList.length > 0) {
+        try {
+          const list = parseDeviceList(bundle.deviceList);
+          if (verifyDeviceList(bundle.identity, list).ok) {
+            await this.contacts.setDeviceList(bundle.identity, bundle.deviceList);
+          }
+        } catch {
+          // Malformed list: keep the rest of the bundle, ignore the list.
+        }
+      }
     }
     if (changed) this.emit('contact', { identity: encodeIdentity(bundle.identity), bundle: encodeBundle(bundle) });
   }
@@ -531,7 +561,11 @@ export class MessagingClient extends Emitter<MessagingEvents> {
         payload: chunks[i]!,
         ...(chunks.length > 1 ? { chunk: { idx: i, total: chunks.length } } : {}),
       };
-      const inner = opts.sign === false ? serializeAuthFrame(base) : signAuthFrame(base, this.keyring.identity, topic, BROADCAST_RECIPIENT);
+      const inner =
+        opts.sign === false ? serializeAuthFrame(base)
+        : this.device ?
+          signAuthFrameWithDevice(base, this.device.identityPub, this.device.keypair, topic, BROADCAST_RECIPIENT)
+        : signAuthFrame(base, this.keyring.identity, topic, BROADCAST_RECIPIENT);
       const body = serializeUserMsgFrame({ topic, body: inner });
       await this.bus.sendBroadcast(USER_DATA_KIND, body, { stem: opts.stem ?? true, ...(opts.signal ? { signal: opts.signal } : {}) });
     }
@@ -614,7 +648,11 @@ export class MessagingClient extends Emitter<MessagingEvents> {
         ...(replyPub ? { replyPub } : {}),
         ...(entry.chunks.length > 1 ? { chunk: { idx, total: entry.chunks.length } } : {}),
       };
-      const inner = o.sign ? signAuthFrame(base, this.keyring.identity, entry.topic, entry.recipient) : serializeAuthFrame(base);
+      const inner =
+        !o.sign ? serializeAuthFrame(base)
+        : this.device ?
+          signAuthFrameWithDevice(base, this.device.identityPub, this.device.keypair, entry.topic, entry.recipient)
+        : signAuthFrame(base, this.keyring.identity, entry.topic, entry.recipient);
       const body = serializeUserMsgFrame({ topic: entry.topic, body: inner });
       // A fresh flag per envelope: the ephemeral element is regenerated each
       // time, so chunks and retries of the same message are unlinkable to each
@@ -696,6 +734,11 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       : sharedBound ? m.sessionPub!
       : this.keyring.identity.pub;
     if (!verifyAuthFrame(frame, topic, recipientForSig)) return;
+    // A device-signed frame proves only that the named DEVICE key signed it.
+    // Whether that device belongs to the account is a separate question, and
+    // the answer is the sender's published device list — without which a
+    // revoked device would still verify against its own key.
+    if (frame.devicePub && frame.sender && !(await this.deviceIsListed(frame.sender, frame.devicePub))) return;
     if (frame.sender && equal(frame.sender, this.keyring.identity.pub) && scope !== 'broadcast') return; // our own echo
 
     if (topic.startsWith(TOPIC_PREKEY_RESPONSE + '/')) return this.onPrekeyRequest(topic, frame, scope);
@@ -785,11 +828,34 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     await this.bus.send(USER_DATA_KIND, frame.replyPub, body, { stem: true });
   }
 
+  /**
+   * Whether `devicePub` appears on `identity`'s verified device list.
+   *
+   * False when we hold no list yet: a device-signed frame from an account we
+   * have never discovered is dropped rather than trusted. The sender's outbox
+   * retries, and by then discovery has usually filled the gap.
+   */
+  private async deviceIsListed(identity: Uint8Array, devicePub: Uint8Array): Promise<boolean> {
+    const raw = this.contacts.get(identity)?.deviceList;
+    if (!raw || raw.length === 0) {
+      // Ask for it, so the retry has a chance of landing.
+      void this.discover(identity).catch(() => {});
+      return false;
+    }
+    try {
+      return isListedDevice(parseDeviceList(raw), devicePub);
+    } catch {
+      return false;
+    }
+  }
+
   private async onPrekeyResponse(frame: AuthFrame, m: InboundMessage): Promise<void> {
     if (m.recipient !== 'session' || !m.sessionPub || !frame.sender) return;
-    // Accept either form: a peer on an older build answers with the 192-byte
-    // v1 bundle and simply gives us no clue key.
-    if (frame.payload.length !== BUNDLE_BYTES && frame.payload.length !== EXTENDED_BUNDLE_BYTES) return;
+    // Accept any form: a peer on an older build answers with the 192-byte v1
+    // bundle (no clue key) or a v2 bundle (no device list). Length no longer
+    // identifies the form, since a v3 bundle carries a variable device list,
+    // so let the parser decide.
+    if (frame.payload.length < BUNDLE_BYTES) return;
     let bundle: Bundle | ExtendedBundle;
     try {
       bundle = parseAnyBundle(frame.payload);

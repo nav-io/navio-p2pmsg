@@ -176,12 +176,24 @@ prekey and clue key than it did before, because both go through the account
 secret. Nothing is deployed on mainnet, so this is free now and would not have
 been later.
 
-Still open in M4, and the reason a secondary device cannot yet send:
+- ✅ **Per-device message signing.** `AuthFrame` gains `FLAG_DEVICE_SIGNED`
+  and a device public key; the signature verifies under that key, and whether
+  the device belongs to the account is decided separately against the sender's
+  published device list. A revoked device still produces a valid signature —
+  it is simply no longer listed, which is the whole mechanism.
+- ✅ **Device list distribution.** Bundle v3 carries the signed list, so a
+  receiver has it before the first device-signed message rather than after. v1
+  and v2 bundles still parse, degrading to "no device list".
+- ✅ `MessagingClient` takes a `device` option and signs with the device key.
 
-- **Per-device message signing.** Frames are still signed by the identity key,
-  which only the primary holds. A secondary needs to sign with its device key
-  and have the receiver check it against the published device list — an
-  AuthFrame change plus device-list distribution in bundle v2.
+Still open in M4, and the reason a secondary cannot yet run standalone:
+
+- **`Keyring` from a pairing grant.** A secondary holds the account secret and
+  the identity PUBLIC key, not the seed — so `Keyring` needs a constructor that
+  takes those instead, with the identity-secret paths (publishing bundles,
+  answering prekey discovery, signing group state) disabled. Until then a
+  secondary is configured with `device` alongside a seed, which is not how a
+  real one will be built.
 - The live pairing exchange over the bus (the codecs and the SAS exist; the
   conversation between the two devices does not).
 - Revocation beyond the key rotation: publishing the revocation record and

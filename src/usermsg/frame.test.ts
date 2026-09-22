@@ -56,16 +56,33 @@ describe('AuthFrame', () => {
     expect(toHex(authFrameDigest('a', new Uint8Array(48), f))).not.toBe(toHex(d1));
   });
   it('max overhead constant is accurate', () => {
+    // The worst case now includes a device key: a secondary device signs with
+    // its own key and the frame has to carry it.
     const bytes = serializeAuthFrame({
       msgId,
       timestamp: 0n,
       sender: pk,
+      devicePub: pk,
       sig,
       replyPub: pk,
       chunk: { idx: 0, total: 1 },
       payload: new Uint8Array(3000),
     });
     expect(bytes.length).toBe(3000 + AUTH_FRAME_MAX_OVERHEAD);
+  });
+
+  it('round trips a device-signed frame and refuses a nonsensical one', () => {
+    const device = new Uint8Array(48).fill(9);
+    const bytes = serializeAuthFrame({ msgId, timestamp: 0n, sender: pk, devicePub: device, sig, payload: new Uint8Array([1]) });
+    const parsed = parseAuthFrame(bytes);
+    expect(parsed.devicePub).toEqual(device);
+    expect(parsed.sender).toEqual(pk);
+
+    // A device key with no account identity names no device list to check it
+    // against, so it is unverifiable by construction.
+    expect(() =>
+      serializeAuthFrame({ msgId, timestamp: 0n, devicePub: device, sig, payload: new Uint8Array([1]) } as never),
+    ).toThrow(/account identity/);
   });
 });
 

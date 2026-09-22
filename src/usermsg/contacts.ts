@@ -20,6 +20,13 @@ export interface Contact {
    */
   clueKey?: Uint8Array; // 1152
   clueKeyEpoch?: number;
+  /**
+   * The contact's signed device list. Needed to decide whether a DEVICE-signed
+   * frame really came from one of their devices; without it such a frame
+   * cannot be trusted, because a revoked device would still verify against its
+   * own key.
+   */
+  deviceList?: Uint8Array;
   /** Reply key the contact sent us most recently; use once then drop. */
   nextKey?: Uint8Array; // 48
   nextKeyAt?: number;
@@ -67,6 +74,13 @@ export class Contacts {
     return this.upsert(bundle.identity, (c) => {
       c.bundle = bundle;
       c.bundleAt = this.now();
+    });
+  }
+
+  /** Record a verified device list (caller verifies it under the identity first). */
+  setDeviceList(identity: Uint8Array, deviceList: Uint8Array): Promise<Contact> {
+    return this.upsert(identity, (c) => {
+      c.deviceList = deviceList.slice();
     });
   }
 
@@ -134,6 +148,10 @@ function encode(c: Contact): Uint8Array {
   // still decodes: the reader treats a short record as "no clue key".
   w.u8(c.clueKey ? 1 : 0);
   if (c.clueKey) w.bytes(c.clueKey).u32(c.clueKeyEpoch ?? 0);
+  // Appended last, so a record written before device lists existed still
+  // decodes as "no device list".
+  w.u8(c.deviceList ? 1 : 0);
+  if (c.deviceList) w.varBytes(c.deviceList);
   return w.finish();
 }
 
@@ -156,6 +174,7 @@ function decode(b: Uint8Array): Contact {
     c.clueKey = r.bytes(FMD_CLUE_KEY_SIZE);
     c.clueKeyEpoch = r.u32();
   }
+  if (r.remaining > 0 && r.u8() === 1) c.deviceList = r.varBytes();
   r.assertDone();
   return c;
 }

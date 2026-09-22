@@ -110,8 +110,15 @@ export interface MessagingClientOptions {
   network: NetworkName;
   /** Inject a pre-built peer network (tests / custom transports). Overrides peers/targetPeers/dnsSeeds. */
   pool?: PeerNetwork;
+  /**
+   * What a pairing grant carried, for a SECONDARY device: the account secret
+   * for one epoch and the account's identity PUBLIC key. Mutually exclusive
+   * with `seed`, and must be accompanied by `device` — a secondary holds no
+   * identity secret, so it has to sign with its own key.
+   */
+  grant?: { accountSecret: Uint8Array; identityPub: Uint8Array; epoch: number };
   /** 32-byte seed; the app owns backup/recovery (mnemonic etc.). */
-  seed: Uint8Array;
+  seed?: Uint8Array;
   store?: Store;
   /** Peer addresses: `host:port`, `ws://…`, `wss://…`. */
   peers?: string[];
@@ -193,6 +200,11 @@ interface PendingAck {
 const SEEN_CAPACITY = 16384;
 const REPLY_KEYS_PER_CONTACT = 4;
 const NS_SEEN = 'seen';
+
+function requireSeed(seed: Uint8Array | undefined): Uint8Array {
+  if (!seed) throw new Error('MessagingClient needs either a seed or a pairing grant');
+  return seed;
+}
 
 export class MessagingClient extends Emitter<MessagingEvents> {
   readonly network: NetworkName;
@@ -288,7 +300,12 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   static async create(o: MessagingClientOptions): Promise<MessagingClient> {
     const store = o.store ?? new MemoryStore();
     const now = o.now ?? (() => Date.now());
-    const keyring = await Keyring.open(o.seed, store, now);
+    if (o.grant && !o.device) {
+      throw new Error('a device built from a grant must also be given its device keypair');
+    }
+    const keyring = o.grant
+      ? await Keyring.forDevice(o.grant, store, now)
+      : await Keyring.open(requireSeed(o.seed), store, now);
     const contacts = new Contacts(store, now);
     await contacts.load();
     const outbox = new Outbox(store, { now, ttlMs: o.messageTtlMs });
@@ -307,6 +324,24 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   get identityBytes(): Uint8Array {
     return this.keyring.identity.pub;
   }
+  /**
+   * Sign an inner frame with whichever key this device is entitled to use: the
+   * account identity on a primary, or this device's own key on a secondary.
+   *
+   * Centralised so callers building their own frames (group messages, for
+   * instance) cannot accidentally take the primary-only path and produce a
+   * signature a secondary device has no key for.
+   */
+  signInnerFrame(
+    base: Omit<AuthFrame, 'sender' | 'sig' | 'devicePub'>,
+    topic: string,
+    recipient: Uint8Array,
+  ): Uint8Array {
+    return this.device
+      ? signAuthFrameWithDevice(base, this.device.identityPub, this.device.keypair, topic, recipient)
+      : signAuthFrame(base, this.keyring.requireIdentitySecret(), topic, recipient);
+  }
+
   /**
    * Register a session key that is shared with several parties, such as a
    * group key. Changes how inbound frames encrypted to it are authenticated —
@@ -562,10 +597,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
         ...(chunks.length > 1 ? { chunk: { idx: i, total: chunks.length } } : {}),
       };
       const inner =
-        opts.sign === false ? serializeAuthFrame(base)
-        : this.device ?
-          signAuthFrameWithDevice(base, this.device.identityPub, this.device.keypair, topic, BROADCAST_RECIPIENT)
-        : signAuthFrame(base, this.keyring.identity, topic, BROADCAST_RECIPIENT);
+        opts.sign === false ? serializeAuthFrame(base) : this.signInnerFrame(base, topic, BROADCAST_RECIPIENT);
       const body = serializeUserMsgFrame({ topic, body: inner });
       await this.bus.sendBroadcast(USER_DATA_KIND, body, { stem: opts.stem ?? true, ...(opts.signal ? { signal: opts.signal } : {}) });
     }
@@ -648,11 +680,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
         ...(replyPub ? { replyPub } : {}),
         ...(entry.chunks.length > 1 ? { chunk: { idx, total: entry.chunks.length } } : {}),
       };
-      const inner =
-        !o.sign ? serializeAuthFrame(base)
-        : this.device ?
-          signAuthFrameWithDevice(base, this.device.identityPub, this.device.keypair, entry.topic, entry.recipient)
-        : signAuthFrame(base, this.keyring.identity, entry.topic, entry.recipient);
+      const inner = o.sign ? this.signInnerFrame(base, entry.topic, entry.recipient) : serializeAuthFrame(base);
       const body = serializeUserMsgFrame({ topic: entry.topic, body: inner });
       // A fresh flag per envelope: the ephemeral element is regenerated each
       // time, so chunks and retries of the same message are unlinkable to each
@@ -809,6 +837,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private async onPrekeyRequest(topic: string, frame: AuthFrame, scope: MessageScope): Promise<void> {
     if (scope !== 'broadcast' || !frame.replyPub) return;
     if (topic !== prekeyRequestTopic(this.keyring.identity.pub)) return; // someone else's
+    // A secondary device cannot sign a bundle, and answering with an
+    // unsigned one would be worse than staying quiet: the primary answers.
+    if (!this.keyring.isPrimary) return;
     // Rate limit per reply key: one answer per 10 s.
     const k = toHex(frame.replyPub);
     const last = this.lastPrekeyReply.get(k) ?? 0;
@@ -820,7 +851,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const bundleBytes = serializeExtendedBundle(this.keyring.extendedBundle());
     const inner = signAuthFrame(
       { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), payload: bundleBytes },
-      this.keyring.identity,
+      this.keyring.requireIdentitySecret(),
       TOPIC_PREKEY_RESPONSE,
       frame.replyPub, // bind to the requester's reply key so the response cannot be replayed elsewhere
     );
@@ -915,9 +946,10 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     this.pendingAcks.delete(key);
     // Carry our own reply key so the sender's next message to us rides a fresh session key.
     const replyPub = this.mintReplyKey(p.identity);
-    const inner = signAuthFrame(
+    // Acks are signed like any other frame, so a secondary device acks with
+    // its own key rather than being unable to ack at all.
+    const inner = this.signInnerFrame(
       { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), replyPub, payload: serializeAcks(p.entries) },
-      this.keyring.identity,
       TOPIC_ACK,
       p.identity,
     );

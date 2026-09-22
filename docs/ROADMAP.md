@@ -186,16 +186,20 @@ been later.
   and v2 bundles still parse, degrading to "no device list".
 - ✅ `MessagingClient` takes a `device` option and signs with the device key.
 
-Still open in M4, and the reason a secondary cannot yet run standalone:
+- ✅ **`Keyring.forDevice`.** A secondary is built from what a grant carries —
+  the account secret for one epoch and the identity PUBLIC key — and nothing
+  else. It shares the account's address and inbox key, so one envelope reaches
+  both devices, and it signs with its device key. `Keyring.identity.sk` is now
+  optional in the type, so the compiler finds every operation that needs the
+  seed; those throw with a plain message rather than producing a signature
+  nobody can verify. A secondary does not answer prekey discovery, because it
+  cannot sign a bundle and an unsigned one would be worse than silence.
 
-- **`Keyring` from a pairing grant.** A secondary holds the account secret and
-  the identity PUBLIC key, not the seed — so `Keyring` needs a constructor that
-  takes those instead, with the identity-secret paths (publishing bundles,
-  answering prekey discovery, signing group state) disabled. Until then a
-  secondary is configured with `device` alongside a seed, which is not how a
-  real one will be built.
+Still open in M4:
+
 - The live pairing exchange over the bus (the codecs and the SAS exist; the
-  conversation between the two devices does not).
+  conversation between the two devices does not, so a grant is currently moved
+  by the application).
 - Revocation beyond the key rotation: publishing the revocation record and
   rekeying the groups the device belonged to.
 - State sync: contacts, group epochs, read state, and the batched

@@ -36,6 +36,19 @@ export interface KeyPair {
   pub: Uint8Array; // 48
 }
 
+/**
+ * The account identity as this device knows it.
+ *
+ * A SECONDARY device has the public key and not the secret: only the primary
+ * holds the seed the identity is derived from. That is deliberate — it is why
+ * a secondary signs with its own device key, and why revoking it works.
+ */
+export interface IdentityKeys {
+  pub: Uint8Array; // 48
+  /** Present on the primary device only. */
+  sk?: Uint8Array; // 32
+}
+
 export function deriveIdentity(seed: Uint8Array): KeyPair {
   const sk = scalarFromSeed(hkdf(sha256, seed, SALT, utf8('identity'), 32));
   return { sk, pub: publicKey(sk) };
@@ -79,7 +92,7 @@ export interface KeyringState {
 }
 
 export class Keyring {
-  readonly identity: KeyPair;
+  readonly identity: IdentityKeys;
   private _prekey: KeyPair;
   private _previous: KeyPair | undefined;
   private state: KeyringState;
@@ -88,17 +101,70 @@ export class Keyring {
   private _fmd: FmdSecretKey | undefined;
   private _clueKey: Uint8Array | undefined;
 
+  /**
+   * Account secret for the current epoch on a device that has no seed. Set
+   * only on a secondary.
+   */
+  private readonly grantedSecret: Uint8Array | undefined;
+
   private constructor(
-    private readonly seed: Uint8Array,
+    private readonly seed: Uint8Array | undefined,
     private readonly store: Store,
     state: KeyringState,
     private readonly now: () => number,
+    granted?: { accountSecret: Uint8Array; identityPub: Uint8Array },
   ) {
-    if (seed.length !== 32) throw new Error('seed must be 32 bytes');
-    this.identity = deriveIdentity(seed);
     this.state = state;
+    if (granted) {
+      if (granted.accountSecret.length !== 32) throw new Error('account secret must be 32 bytes');
+      if (granted.identityPub.length !== 48) throw new Error('identity pubkey must be 48 bytes');
+      this.grantedSecret = granted.accountSecret;
+      this.identity = { pub: granted.identityPub.slice() };
+      this._prekey = deriveInboxPrekey(granted.accountSecret);
+      // A secondary holds one epoch's secret and nothing before it, so there
+      // is no grace key to fall back on.
+      this._previous = undefined;
+      return;
+    }
+    if (!seed || seed.length !== 32) throw new Error('seed must be 32 bytes');
+    this.identity = deriveIdentity(seed);
     this._prekey = derivePrekey(seed, state.epoch);
     this._previous = state.epoch > 0 ? derivePrekey(seed, state.epoch - 1) : undefined;
+  }
+
+  /** True when this device holds the seed, and so can rotate and sign as the account. */
+  get isPrimary(): boolean {
+    return this.seed !== undefined;
+  }
+
+  /**
+   * The identity keypair, for operations that sign AS THE ACCOUNT. Throws on a
+   * secondary device, which has no identity secret and must sign with its
+   * device key instead.
+   */
+  requireIdentitySecret(): KeyPair {
+    if (!this.identity.sk) {
+      throw new Error('this device has no identity secret; sign with its device key instead');
+    }
+    return { sk: this.identity.sk, pub: this.identity.pub };
+  }
+
+  /**
+   * Open a keyring for a SECONDARY device, from what a pairing grant carries:
+   * the account secret for one epoch and the identity public key.
+   *
+   * The result decrypts everything the primary does — same inbox key, same FMD
+   * key, from the same single envelope — but cannot sign as the account,
+   * publish a bundle, answer prekey discovery or rotate the epoch. All of
+   * those need the seed, which is exactly what makes revoking this device
+   * effective.
+   */
+  static async forDevice(
+    granted: { accountSecret: Uint8Array; identityPub: Uint8Array; epoch: number },
+    store: Store,
+    now: () => number = () => Date.now(),
+  ): Promise<Keyring> {
+    return new Keyring(undefined, store, { epoch: granted.epoch, rotatedAt: now() }, now, granted);
   }
 
   static async open(seed: Uint8Array, store: Store, now: () => number = () => Date.now()): Promise<Keyring> {
@@ -132,7 +198,7 @@ export class Keyring {
     return {
       identity: this.identity.pub,
       prekey: this._prekey.pub,
-      prekeySig: signPrekey(this.identity, this._prekey.pub),
+      prekeySig: signPrekey(this.requireIdentitySecret(), this._prekey.pub),
     };
   }
 
@@ -154,6 +220,12 @@ export class Keyring {
    * the next epoch, or revoking it would achieve nothing.
    */
   accountSecret(epoch = this.state.epoch): Uint8Array {
+    if (!this.seed) {
+      // A secondary was handed exactly one epoch and has no way to compute
+      // another; asking for a different one is a bug, not a fallback.
+      if (epoch !== this.state.epoch) throw new Error('this device holds only the current account epoch');
+      return this.grantedSecret!;
+    }
     return deriveAccountSecret(this.seed, epoch);
   }
 
@@ -191,12 +263,13 @@ export class Keyring {
       ...this.bundle(),
       fmdEpoch: this.state.epoch,
       fmdClueKey: clueKey,
-      fmdSig: signAugmented(this.identity.sk, fmdSigMessage(this.state.epoch, clueKey)),
+      fmdSig: signAugmented(this.requireIdentitySecret().sk, fmdSigMessage(this.state.epoch, clueKey)),
       deviceList: this.deviceList,
     };
   }
 
   async rotatePrekey(): Promise<KeyPair> {
+    if (!this.seed) throw new Error('only the primary device can rotate the account epoch');
     this._previous = this._prekey;
     this.state = { epoch: this.state.epoch + 1, rotatedAt: this.now() };
     this._prekey = derivePrekey(this.seed, this.state.epoch);

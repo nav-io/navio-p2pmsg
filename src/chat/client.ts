@@ -38,7 +38,6 @@ import {
 } from './frame.js';
 import { ChatStore, type MessageView, type StoredMessage } from './store.js';
 import { USER_DATA_KIND, serializeUserMsgFrame } from '../usermsg/frame.js';
-import { signAuthFrame } from '../usermsg/auth.js';
 import { randomBytes } from '../common/bytes.js';
 import { fmdFlag, parseClueKey } from '../bus/fmd.js';
 import { deriveGroupEpoch, type GroupEpochKeys, randomEpochSecret } from './group/schedule.js';
@@ -488,7 +487,7 @@ export class ChatClient extends Emitter<ChatEvents> {
         prevStateHash: new Uint8Array(32),
         author: me,
       },
-      this.client.keyring.identity.sk,
+      this.client.keyring.requireIdentitySecret().sk,
     );
     const secret = randomEpochSecret();
     await this.adoptGroup(state, secret);
@@ -513,7 +512,7 @@ export class ChatClient extends Emitter<ChatEvents> {
     if (!state) throw new Error('unknown group');
     const { state: next, rekey } = applyGroupOp(state, op, {
       identity: decodeIdentity(this.client.identity),
-      sk: this.client.keyring.identity.sk,
+      sk: this.client.keyring.requireIdentitySecret().sk,
     }, this.now);
 
     // A rekey mints a fresh secret; anything else keeps the current one, so a
@@ -547,7 +546,7 @@ export class ChatClient extends Emitter<ChatEvents> {
           expiresAt: BigInt(Math.floor(this.now() / 1000) + ttlSeconds),
           inviter: decodeIdentity(this.client.identity),
         },
-        this.client.keyring.identity.sk,
+        this.client.keyring.requireIdentitySecret().sk,
       ),
     );
   }
@@ -607,9 +606,11 @@ export class ChatClient extends Emitter<ChatEvents> {
     const topic = chatTopic(groupId);
     // Signed by our identity so members can attribute it; addressed to the
     // group key so only members can open it.
-    const inner = signAuthFrame(
+    // Signed with whatever key this device may use — identity on a primary,
+    // device key on a secondary — and addressed to the group key so only
+    // members can open it.
+    const inner = this.client.signInnerFrame(
       { msgId: randomBytes(16), timestamp: BigInt(Math.floor(this.now() / 1000)), payload: serializeChatFrame(frame) },
-      this.client.keyring.identity,
       topic,
       keys.eciesPub,
     );

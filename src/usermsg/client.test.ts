@@ -276,11 +276,11 @@ describe('MessagingClient device-signed frames', () => {
       createdAt,
       caps,
       label: 'phone',
-      cert: signDeviceCert(alice.keyring.identity.sk, { devicePub: device.pub, createdAt, caps }),
+      cert: signDeviceCert(alice.keyring.requireIdentitySecret().sk, { devicePub: device.pub, createdAt, caps }),
     };
     const list = signDeviceList(
       { version: DEVICE_LIST_VERSION, accountEpoch: 0, devices: [entry] },
-      alice.keyring.identity.sk,
+      alice.keyring.requireIdentitySecret().sk,
     );
     alice.keyring.deviceList = serializeDeviceList(list);
 
@@ -314,11 +314,11 @@ describe('MessagingClient device-signed frames', () => {
             createdAt,
             caps,
             label: 'laptop',
-            cert: signDeviceCert(alice.keyring.identity.sk, { devicePub: replacement.pub, createdAt, caps }),
+            cert: signDeviceCert(alice.keyring.requireIdentitySecret().sk, { devicePub: replacement.pub, createdAt, caps }),
           },
         ],
       },
-      alice.keyring.identity.sk,
+      alice.keyring.requireIdentitySecret().sk,
     );
     await bob.contacts.setDeviceList(identityPub, serializeDeviceList(goodRevoked));
 
@@ -332,5 +332,118 @@ describe('MessagingClient device-signed frames', () => {
     // The device key still produces a valid signature; it is simply no longer
     // one of Alice's devices, which is the whole point of revocation.
     expect(delivered).toBe(false);
+  }, 40000);
+});
+
+describe('secondary device built from a pairing grant', () => {
+  /** Everything a grant carries, produced the way a primary would. */
+  function grantFrom(primary: MessagingClient) {
+    const device = generateDevice();
+    const createdAt = 1700000000n;
+    const caps = 0;
+    const identitySk = primary.keyring.requireIdentitySecret().sk;
+    const entry = {
+      deviceId: device.id,
+      devicePub: device.pub,
+      createdAt,
+      caps,
+      label: 'phone',
+      cert: signDeviceCert(identitySk, { devicePub: device.pub, createdAt, caps }),
+    };
+    const list = signDeviceList({ version: DEVICE_LIST_VERSION, accountEpoch: 0, devices: [entry] }, identitySk);
+    primary.keyring.deviceList = serializeDeviceList(list);
+    return {
+      device,
+      grant: {
+        accountSecret: primary.keyring.accountSecret(),
+        identityPub: primary.keyring.identity.pub,
+        epoch: primary.keyring.epoch,
+      },
+    };
+  }
+
+  it('shares the account address and inbox key with the primary', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 40);
+    const { device, grant } = grantFrom(primary);
+    const secondary = await mk(hub, 41, {
+      seed: undefined,
+      grant,
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+
+    // Same account: same address, and the same key senders encrypt to — which
+    // is why ONE envelope reaches both devices.
+    expect(secondary.identity).toBe(primary.identity);
+    expect(secondary.keyring.prekey.pub).toEqual(primary.keyring.prekey.pub);
+    expect(secondary.keyring.isPrimary).toBe(false);
+    expect(primary.keyring.isPrimary).toBe(true);
+  }, 30000);
+
+  it('cannot sign as the account, and says so plainly', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 42);
+    const { device, grant } = grantFrom(primary);
+    const secondary = await mk(hub, 43, {
+      seed: undefined,
+      grant,
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+
+    // These are the operations that need the seed. A secondary failing them
+    // loudly is the point: silently producing an unsigned or wrongly signed
+    // bundle would be far worse.
+    expect(() => secondary.keyring.requireIdentitySecret()).toThrow(/device key/);
+    expect(() => secondary.bundle()).toThrow(/device key/);
+    await expect(secondary.keyring.rotateAccountEpoch()).rejects.toThrow(/primary/);
+    // And it holds only the epoch it was granted.
+    expect(() => secondary.keyring.accountSecret(99)).toThrow(/current account epoch/);
+  }, 30000);
+
+  it('both devices receive the same message from one envelope', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 44);
+    const { device, grant } = grantFrom(primary);
+    const secondary = await mk(hub, 45, {
+      seed: undefined,
+      grant,
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+    const sender = await mk(hub, 46);
+    await sender.addContact(primary.bundle());
+
+    const atPrimary = waitFor(primary, 'message');
+    const atSecondary = waitFor(secondary, 'message');
+    await sender.send(primary.identity, utf8('reaches both'));
+    expect(fromUtf8((await atPrimary).payload)).toBe('reaches both');
+    expect(fromUtf8((await atSecondary).payload)).toBe('reaches both');
+  }, 30000);
+
+  it('sends with its device key and the recipient accepts it', async () => {
+    const hub = new Hub();
+    const primary = await mk(hub, 47);
+    const { device, grant } = grantFrom(primary);
+    const secondary = await mk(hub, 48, {
+      seed: undefined,
+      grant,
+      device: { keypair: { sk: device.sk, pub: device.pub }, identityPub: grant.identityPub },
+    });
+    const peer = await mk(hub, 49);
+
+    // The peer discovers the account from the PRIMARY, which is what publishes
+    // the bundle carrying the device list.
+    const learned = waitFor(peer, 'contact', (c) => c.identity === primary.identity);
+    await peer.addContact(primary.identity);
+    await primary.addContact(peer.bundle());
+    await peer.send(primary.identity, utf8('hello'));
+    await learned;
+
+    await secondary.addContact(peer.bundle());
+    const got = waitFor(peer, 'message', (m) => fromUtf8(m.payload) === 'sent from the phone');
+    await secondary.send(peer.identity, utf8('sent from the phone'));
+    const ev = await got;
+    // Attributed to the ACCOUNT, not the device: which device sent it is not
+    // the correspondent's concern.
+    expect(ev.from).toBe(primary.identity);
   }, 40000);
 });

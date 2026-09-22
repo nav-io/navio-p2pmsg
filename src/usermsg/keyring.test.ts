@@ -42,7 +42,7 @@ describe('auth frames', () => {
     const recipient = derivePrekey(new Uint8Array(32).fill(1), 0).pub;
     const bytes = signAuthFrame(
       { msgId: new Uint8Array(16).fill(5), timestamp: 42n, payload: new Uint8Array([1, 2, 3]) },
-      k.identity,
+      k.requireIdentitySecret(),
       'chat',
       recipient,
     );

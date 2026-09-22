@@ -16,6 +16,7 @@ import { decodeIdentity, encodeIdentity } from '../usermsg/bundle.js';
 import { ConversationDag, type Gap } from './dag.js';
 import {
   type AttachRef,
+  MAX_THUMBNAIL_BYTES,
   type ChatFrame,
   ChatFrameType,
   chatMessageId,
@@ -41,6 +42,16 @@ import {
   serializeTextBody,
 } from './frame.js';
 import { ChatStore, type MessageView, type StoredMessage } from './store.js';
+import { decryptFile, encryptFile, type FileClient, type FileServer } from '../stream/file.js';
+
+/**
+ * Largest attachment that fits the bus without a direct channel.
+ *
+ * A frame is 3584 bytes and the chunker allows 16 of them, so this is the real
+ * ceiling — roughly 53 KB, and 16 proofs of work. Enough for a thumbnail or a
+ * voice note; not for a video, which is what the direct channel is for.
+ */
+export const MAX_BUS_ATTACHMENT_BYTES = 50 * 1024;
 import { USER_DATA_KIND, serializeUserMsgFrame } from '../usermsg/frame.js';
 import { randomBytes } from '../common/bytes.js';
 import { extractDetectionKey, fmdFlag, parseClueKey } from '../bus/fmd.js';
@@ -601,6 +612,53 @@ export class ChatClient extends Emitter<ChatEvents> {
       await this.sendGroupKeys(encodeIdentity(m.identity), next, secret);
     }
     return next;
+  }
+
+  /**
+   * Attach a file to a message.
+   *
+   * The file is encrypted under its OWN key and the ciphertext is offered on
+   * the direct channel; only a hash, a size, a mime type, that key and an
+   * optional thumbnail ride the bus. The thumbnail is what lets a preview
+   * render before the transfer starts.
+   *
+   * With no direct channel, files up to `MAX_BUS_ATTACHMENT_BYTES` can still
+   * be carried inline as chunked bus messages — the honest ceiling of a
+   * 3584-byte frame with a proof of work per envelope. Anything larger needs
+   * the direct channel, and says so rather than failing obscurely.
+   */
+  async attach(
+    file: Uint8Array,
+    opts: { mime?: string; thumbnail?: Uint8Array; server?: FileServer } = {},
+  ): Promise<AttachRef> {
+    const { ciphertext, key, contentHash } = encryptFile(file);
+    if (opts.server) {
+      opts.server.offer(contentHash, ciphertext);
+    } else if (ciphertext.length > MAX_BUS_ATTACHMENT_BYTES) {
+      throw new Error(
+        `attachment is ${ciphertext.length} bytes; without a direct channel the ceiling is ${MAX_BUS_ATTACHMENT_BYTES}`,
+      );
+    }
+    const thumbnail = opts.thumbnail ?? new Uint8Array(0);
+    if (thumbnail.length > MAX_THUMBNAIL_BYTES) throw new Error('thumbnail too large');
+    return {
+      contentHash,
+      size: BigInt(ciphertext.length),
+      mime: opts.mime ?? 'application/octet-stream',
+      key,
+      thumbnail,
+    };
+  }
+
+  /**
+   * Fetch and decrypt an attachment over a direct channel.
+   *
+   * The per-file key is what makes the ciphertext safe to move over any
+   * carrier, so it comes from the message rather than from the transfer.
+   */
+  async fetchAttachment(ref: AttachRef, client: FileClient, opts: { timeoutMs?: number } = {}): Promise<Uint8Array> {
+    const ciphertext = await client.fetch(ref.contentHash, opts);
+    return decryptFile(ciphertext, ref.key);
   }
 
   /**

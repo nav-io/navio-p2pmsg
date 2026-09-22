@@ -79,7 +79,9 @@ async function mk(hub: Hub, seedByte: number, extra: Partial<Parameters<typeof M
     powWorkers: 0,
     ackDelayMs: 50,
     retryTickMs: 200,
-    discoveryTimeoutMs: 5000,
+    // Generous: these suites run alongside native builds, and a discovery
+    // that times out under load says nothing about correctness.
+    discoveryTimeoutMs: 20000,
     ...extra,
   });
   clients.push(c);

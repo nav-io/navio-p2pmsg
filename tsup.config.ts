@@ -11,6 +11,7 @@ export default defineConfig({
     'chat/index': 'src/chat/index.ts',
     'devices/index': 'src/devices/index.ts',
     'backup/index': 'src/backup/index.ts',
+    'stream/index': 'src/stream/index.ts',
     'bus/pow-worker': 'src/bus/pow-worker.ts',
   },
   format: ['esm', 'cjs'],

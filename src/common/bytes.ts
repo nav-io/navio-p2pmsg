@@ -41,8 +41,16 @@ export function fromUtf8(b: Uint8Array): string {
   return new TextDecoder().decode(b);
 }
 
+/** Web Crypto refuses more than this in one call, in every runtime. */
+const MAX_RANDOM_CHUNK = 65536;
+
 export function randomBytes(n: number): Uint8Array {
   const out = new Uint8Array(n);
-  globalThis.crypto.getRandomValues(out);
+  // Filled in chunks: `getRandomValues` throws above 64 KiB, which would
+  // otherwise turn any large buffer into a confusing runtime error far from
+  // the call that asked for it.
+  for (let at = 0; at < n; at += MAX_RANDOM_CHUNK) {
+    globalThis.crypto.getRandomValues(out.subarray(at, Math.min(n, at + MAX_RANDOM_CHUNK)));
+  }
   return out;
 }

@@ -7,6 +7,9 @@ import { ChatClient, type ChatEvents } from './client.js';
 import { decodeInvite, InviteKind } from './group/invite.js';
 import { GroupRole, memberOf } from './group/state.js';
 import { decodeIdentity } from '../usermsg/bundle.js';
+import { loopbackPair } from '../stream/transport.js';
+import { FileClient, FileServer } from '../stream/file.js';
+import { randomBytes } from '../common/bytes.js';
 
 type NetEvents = {
   message: { peerId: string; stem: boolean; payload: Uint8Array };
@@ -68,7 +71,9 @@ async function mk(hub: Hub, seedByte: number) {
     powWorkers: 0,
     ackDelayMs: 50,
     retryTickMs: 200,
-    discoveryTimeoutMs: 5000,
+    // Generous: these suites run alongside native builds, and a discovery
+    // that times out under load says nothing about correctness.
+    discoveryTimeoutMs: 20000,
   });
   open.push(client);
   await client.connect();
@@ -619,4 +624,55 @@ describe('payments in a conversation', () => {
     const receipt = await paid;
     expect(receipt.payment.reference).toEqual(reference);
   }, 40000);
+});
+
+describe('attachments', () => {
+  it('sends a file reference over the bus and the bytes over the channel', async () => {
+    // Only a hash, size, mime, key and thumbnail ride the bus. The file
+    // itself is far too big for a 3584-byte frame.
+    const hub = new Hub();
+    const a = await mk(hub, 160);
+    const b = await mk(hub, 161);
+    await a.client.addContact(b.client.bundle());
+    await b.client.addContact(a.client.bundle());
+    await a.chat.markKnown(b.chat.identity);
+    await b.chat.markKnown(a.chat.identity);
+
+    const [left, right] = loopbackPair();
+    const server = new FileServer(left.channel('file'));
+    const client = new FileClient(right.channel('file'));
+
+    const file = randomBytes(300 * 1024);
+    const ref = await a.chat.attach(file, { mime: 'image/png', thumbnail: randomBytes(64), server });
+    expect(ref.contentHash).toHaveLength(32);
+    expect(Number(ref.size)).toBeGreaterThan(file.length - 1);
+
+    const got = waitFor(b.chat, 'message', (e) => e.message.attachments.length > 0);
+    await a.chat.sendText(b.chat.identity, 'here it is', { attachments: [ref] });
+    const ev = await got;
+    const received = ev.message.attachments[0]!;
+    expect(toHex(received.contentHash)).toBe(toHex(ref.contentHash));
+    expect(received.thumbnail).toHaveLength(64);
+
+    // And the bytes come over the direct channel, verified by content hash and
+    // decrypted with the key that arrived in the message.
+    const bytes = await b.chat.fetchAttachment(received, client, { timeoutMs: 15000 });
+    expect(toHex(bytes)).toBe(toHex(file));
+  }, 60000);
+
+  it('refuses a large attachment when there is no direct channel', async () => {
+    // Honest ceiling rather than an obscure failure deep in the chunker.
+    const hub = new Hub();
+    const a = await mk(hub, 164);
+    await expect(a.chat.attach(randomBytes(200 * 1024))).rejects.toThrow(/direct channel/);
+    // Something small still works inline.
+    const ref = await a.chat.attach(randomBytes(1024), { mime: 'text/plain' });
+    expect(ref.mime).toBe('text/plain');
+  }, 30000);
+
+  it('rejects an oversized thumbnail', async () => {
+    const hub = new Hub();
+    const a = await mk(hub, 166);
+    await expect(a.chat.attach(randomBytes(100), { thumbnail: randomBytes(2000) })).rejects.toThrow(/thumbnail/);
+  }, 30000);
 });

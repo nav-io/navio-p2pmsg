@@ -97,6 +97,16 @@
         "types": "./dist/backup/index.d.cts",
         "default": "./dist/backup/index.cjs"
       }
+    },
+    "./stream": {
+      "import": {
+        "types": "./dist/stream/index.d.ts",
+        "default": "./dist/stream/index.js"
+      },
+      "require": {
+        "types": "./dist/stream/index.d.cts",
+        "default": "./dist/stream/index.cjs"
+      }
     }
   },
   "files": [

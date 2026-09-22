@@ -337,11 +337,18 @@ export class ChatClient extends Emitter<ChatEvents> {
       // surfaced as `readBy`, never stored as a message.
       if (!(await this.isKnown(m.from))) return;
       const heads = parseReceiptBody(frame.body).heads;
+      // Emit for the messages whose read state actually CHANGED, not for the
+      // heads the receipt names. A head is often an edit or a reaction rather
+      // than a rendered message, so keying on it would silently emit nothing
+      // exactly when a conversation is most active.
+      const before = new Map(
+        (await this.chat.view(frame.convId)).messages.map((m) => [toHex(m.id), m.readBy.length]),
+      );
       await this.chat.setReadBy(frame.convId, sender, heads);
-      const view = await this.chat.view(frame.convId);
-      for (const head of heads) {
-        const rendered = view.messages.find((v) => toHex(v.id) === toHex(head));
-        if (rendered) this.emit('update', { convId: frame.convId, message: rendered });
+      for (const m of (await this.chat.view(frame.convId)).messages) {
+        if (m.readBy.length !== (before.get(toHex(m.id)) ?? 0)) {
+          this.emit('update', { convId: frame.convId, message: m });
+        }
       }
       return;
     }

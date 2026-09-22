@@ -226,16 +226,41 @@ Still open in M4:
   are not lost, which means a revoked device can still read that window;
   applications should say so, and an immediate cut-off is not yet offered.
 
-### M5 — stream layer
+### M5 — stream layer (core done, WebRTC backend pending)
 
-`StreamTransport`, bus signalling, WebRTC both runtimes, chunked encrypted file
-transfer with resume, attachments in the chat schema, typing and presence,
-new-device history backfill, bus-chunked fallback.
+Done, in `src/stream/`:
 
-### M6 — product surface
+- ✅ `transport.ts` — the `StreamTransport` / `StreamSession` / `StreamChannel`
+  seam, plus a loopback pair that delivers **asynchronously**, so code relying
+  on synchronous delivery fails in tests rather than over a socket.
+- ✅ `file.ts` — resumable, content-addressed transfer with per-file
+  encryption. The key travels in the chat message, never with the bytes, so the
+  ciphertext is safe to move over any carrier.
+- ✅ `ephemeral.ts` — typing and presence, direct channel only and coalesced.
+- ✅ `signal.ts` — offer/answer/candidate codec, carried on ordinary chat
+  frames so an offer survives the peer being offline.
+- ✅ Attachments in the chat layer, with an honest ~50 KB ceiling when there is
+  no direct channel.
 
-Full-text search, BIP39 and encrypted export, payment message types over
-`navio-sdk`, 1:1 calls.
+Still open in M5:
+
+- **The WebRTC backend.** Written and then removed: with no browser and no
+  signalling partner available here it could only have been a class whose
+  behaviour is to throw, and an untested implementation behind a confident API
+  is worse than an absent one. The interface and the signal codec are the seam
+  it plugs into.
+- History backfill for a newly paired device (the protocol is described in
+  docs/stream.md; the transfer machinery it needs now exists).
+- Calls.
+
+### M6 — product surface (done except calls)
+
+- ✅ Full-text search (M2).
+- ✅ BIP39 seed phrases and encrypted state export, under a passphrase rather
+  than the seed so the two backups fail independently.
+- ✅ Payment message types; the wallet stays an application concern, which is
+  the reason this package has no chain dependency.
+- Calls remain, and depend on the WebRTC backend.
 
 ## Dependency graph
 

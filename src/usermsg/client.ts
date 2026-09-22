@@ -572,6 +572,17 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const { identity, bundle } = decodeContact(contact);
     if (bundle) await this.learnBundle(bundle);
     else await this.contacts.touch(identity);
+    // A `navmsg1…` string carries the prekey but NOT the clue key — that is
+    // 1152 bytes and lives in the discovery response instead. Without it we
+    // cannot flag messages to this contact, and their offline delivery would
+    // silently never work. So discover anyway, in the background: the contact
+    // is usable immediately either way.
+    if (!this.contacts.get(identity)?.clueKey) {
+      void this.discover(identity).catch(() => {
+        // Offline, or the peer is not reachable yet. Sends still work; they
+        // just are not archivable until discovery succeeds.
+      });
+    }
     return encodeIdentity(identity);
   }
 

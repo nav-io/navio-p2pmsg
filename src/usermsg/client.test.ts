@@ -685,12 +685,14 @@ describe('sent-message mirroring', () => {
     const peer = await mk(hub, 115);
     await solo.addContact(peer.bundle());
 
-    net.sent.length = 0;
     await solo.send(peer.identity, utf8('no mirror needed'));
+    await new Promise((r) => setTimeout(r, 300));
+    // Count only what the flush itself emits: adding a contact also triggers
+    // discovery, so counting every envelope would measure the wrong thing.
+    net.sent.length = 0;
     await solo.flushMirror();
     await new Promise((r) => setTimeout(r, 300));
-    // Exactly the one message; no second envelope.
-    expect(net.sent.length).toBe(1);
+    expect(net.sent.length).toBe(0);
   }, 30000);
 });
 

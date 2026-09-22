@@ -5,6 +5,7 @@
 import { randomBytes } from '../common/bytes.js';
 import { CodecError, MessageParser, ProtocolError, encodeMessage, type ParsedMessage } from './codec.js';
 import { Emitter } from './emitter.js';
+import { V2Session } from './bip324/session.js';
 import {
   MessageType,
   NetworkMagic,
@@ -38,8 +39,30 @@ export interface PeerOptions {
   pingIntervalMs?: number;
   /** Drop the peer if a `pong` does not arrive within this. Default 2 x pingIntervalMs (20 s when periodic pings are off). */
   pongTimeoutMs?: number;
+  /**
+   * Transport to use. Default 'v1'.
+   *
+   *   'v1'      never attempt BIP324.
+   *   'v2'      open with a BIP324 handshake, falling back in-band if the peer
+   *             speaks first with the v1 prefix.
+   *   'v2-only' as 'v2', but drop a peer that answers with v1.
+   *
+   * IMPORTANT for outbound connections: the in-band fallback only helps when
+   * the peer sends first, which a v1 RESPONDER never does — it waits for our
+   * `version`, sees 64 bytes of ElligatorSwift instead, and disconnects. So a
+   * v2 attempt against a v1 node fails as a dropped connection, and recovering
+   * means redialling with 'v1'. `PeerPool` does that; a caller driving `Peer`
+   * directly must handle it.
+   *
+   * v2 encrypts and authenticates the whole link. The concrete reason this SDK
+   * wants it is the archive query, which hands a node our FMD detection key —
+   * on a v1 link anyone on the path collects it.
+   */
+  transportVersion?: 'v1' | 'v2' | 'v2-only';
   /** Clock source (unix ms). Default `Date.now`. Exposed for tests. */
   now?: () => number;
+  /** Test hook: entropy for the BIP324 handshake. */
+  randomBytes?: (n: number) => Uint8Array;
 }
 
 export interface PeerVersionInfo {
@@ -101,6 +124,10 @@ export class Peer extends Emitter<PeerEvents> {
   private pendingPing: { nonce: bigint; sentAt: number } | null = null;
   private handshake: { resolve: () => void; reject: (e: Error) => void } | null = null;
   private closeError: Error | undefined;
+  /** BIP324 session, until it completes or falls back to v1. */
+  private v2: V2Session | undefined;
+  /** Messages issued before the encrypted channel is up, sent once it is. */
+  private v2Queue: Array<{ command: string; payload: Uint8Array }> = [];
 
   constructor(
     readonly transport: Transport,
@@ -120,8 +147,17 @@ export class Peer extends Emitter<PeerEvents> {
       handshakeTimeoutMs: opts.handshakeTimeoutMs ?? 10_000,
       pingIntervalMs: opts.pingIntervalMs ?? 60_000,
       pongTimeoutMs: opts.pongTimeoutMs ?? ((opts.pingIntervalMs ?? 60_000) > 0 ? 2 * (opts.pingIntervalMs ?? 60_000) : 20_000),
+      transportVersion: opts.transportVersion ?? 'v1',
       now: opts.now ?? (() => Date.now()),
+      randomBytes: opts.randomBytes ?? randomBytes,
     };
+    if (this.opts.transportVersion !== 'v1') {
+      this.v2 = new V2Session({
+        magic: this.magic,
+        randomBytes: this.opts.randomBytes,
+        allowV1Fallback: this.opts.transportVersion === 'v2',
+      });
+    }
     this.localNonce = new DataView(randomBytes(8).buffer).getBigUint64(0, true);
     this.parser = new MessageParser(this.magic, {
       onError: (e: CodecError) => this.emit('error', e),
@@ -170,6 +206,10 @@ export class Peer extends Emitter<PeerEvents> {
       this.close(new Error(`Peer: handshake timeout (${this.opts.handshakeTimeoutMs} ms) with ${this.id}`));
     }, this.opts.handshakeTimeoutMs);
     try {
+      // The v2 handshake has to go first: its opening bytes are what tells the
+      // peer this is not a v1 connection. `version` is queued behind it and
+      // flushed once the channel is up (or sent in the clear on fallback).
+      if (this.v2) this.transport.send(this.v2.start());
       this.send(MessageType.VERSION, encodeVersion(this.buildVersion()));
     } catch (e) {
       this.close(e instanceof Error ? e : new Error(String(e)));
@@ -182,7 +222,32 @@ export class Peer extends Emitter<PeerEvents> {
     if (this._state === 'closed' || this._state === 'idle') {
       throw new Error(`Peer.send: not connected (${this._state})`);
     }
+    if (this.v2) {
+      if (this.v2.currentState === 'ready') {
+        this.transport.send(this.v2.encode(command, payload));
+      } else {
+        // Nothing can go out in the clear once we have started a v2 handshake:
+        // it would be read as garbage and poison the terminator search.
+        this.v2Queue.push({ command, payload: payload.slice() });
+      }
+      return;
+    }
     this.transport.send(encodeMessage(this.magic, command, payload));
+  }
+
+  /** Transport actually in use once the handshake settles. */
+  get transportVersion(): 'v1' | 'v2' {
+    return this.v2 ? 'v2' : 'v1';
+  }
+
+  /** BIP324 session id, or undefined on a v1 link. */
+  get sessionId(): Uint8Array | undefined {
+    return this.v2?.sessionId;
+  }
+
+  private flushV2Queue(): void {
+    const queued = this.v2Queue.splice(0);
+    for (const m of queued) this.send(m.command, m.payload);
   }
 
   /** Send an envelope as `dp2pmsg` (stem) or `p2pmsg` (fluff). Requires a completed handshake. */
@@ -230,6 +295,48 @@ export class Peer extends Emitter<PeerEvents> {
 
   private onData(bytes: Uint8Array): void {
     if (this._state === 'closed') return;
+    if (this.v2) {
+      this.onV2Data(bytes);
+      return;
+    }
+    this.onV1Data(bytes);
+  }
+
+  private onV2Data(bytes: Uint8Array): void {
+    const session = this.v2!;
+    const wasReady = session.currentState === 'ready';
+    const res = session.receive(bytes);
+    // Read the state once, into a local: `currentState` changed inside
+    // `receive`, and comparing the getter twice invites the compiler to narrow
+    // it against a stale observation.
+    const now = session.currentState;
+    if (res.send) this.transport.send(res.send);
+
+    if (res.v1Fallback) {
+      // The peer is v1. Drop the session, hand the bytes we buffered to the v1
+      // parser untouched, and re-send whatever was queued in the clear.
+      this.v2 = undefined;
+      this.flushV2Queue();
+      if (res.leftover && res.leftover.length > 0) this.onV1Data(res.leftover);
+      return;
+    }
+    if (now === 'failed') {
+      this.close(new Error(`Peer: BIP324 handshake failed with ${this.id}`));
+      return;
+    }
+    if (!wasReady && now === 'ready') this.flushV2Queue();
+
+    for (const m of res.messages) {
+      if (this.closed) return;
+      try {
+        this.dispatch(m);
+      } catch (e) {
+        this.emit('error', e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  }
+
+  private onV1Data(bytes: Uint8Array): void {
     let msgs: ParsedMessage[];
     try {
       msgs = this.parser.feed(bytes);

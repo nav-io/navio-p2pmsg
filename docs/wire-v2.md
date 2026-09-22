@@ -108,9 +108,9 @@ See `archive.md` for the scaling rule.
 The SDK currently implements v1 transport only. Decision 26 adds BIP324 v2
 transport to `net`:
 
-- ElligatorSwift-encoded X25519 key exchange, garbage and garbage terminators,
-  packet-level ChaCha20-Poly1305 with the BIP324 session keys, short message
-  id table.
+- ElligatorSwift-encoded **secp256k1** x-only ECDH (not X25519, as an earlier
+  draft of this document said), garbage and garbage terminators, packet-level
+  ChaCha20-Poly1305 with the BIP324 session keys, short message id table.
 - Advertise `NODE_P2P_V2`; navio-core already gates this behind `-v2transport`
   (`src/init.cpp:999`).
 - Opportunistic: try v2, fall back to v1 on failure, and allow the application
@@ -138,4 +138,10 @@ SDK:
       is folded into `payloadHash` before grinding starts
 - [x] replay key is now `SHA256(kind ‖ payloadHash)`, covering the flag
 - [x] shared test vectors with navio-core, both directions
-- [ ] `src/net/`: BIP324 transport, negotiation, fallback — **not started**
+- [x] `src/net/bip324/`: ElligatorSwift (map, inverse map, ECDH), FSChaCha20 and
+      FSChaCha20Poly1305, key derivation, packet framing, message-id table and
+      the handshake state machine
+- [x] verified against the BIP's own vectors (ellswift decode, `xswiftec_inv`,
+      packet encoding through several rekeys) and against a live naviod
+- [x] `Peer`/`PeerPool` integration with a v1 redial, opt-in via
+      `transportVersion`

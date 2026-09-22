@@ -58,7 +58,9 @@ client.subscribe('news', (m) => console.log('news:', fromUtf8(m.payload)));
 await client.publish('news', utf8('hello world'));
 
 // Catch up on anything that arrived while this client was offline. Needs a
-// connected peer advertising NODE_P2PMSG_ARCHIVE.
+// connected peer advertising NODE_P2PMSG_ARCHIVE. Prefer `transportVersion:
+// 'v2'` on the client above: the query carries a detection key, and a v1 link
+// shows it to anyone on the path.
 await client.syncArchive({ precision: 8 });
 ```
 
@@ -96,6 +98,11 @@ await client.syncArchive({ precision: 8 });
 | `navio-p2pmsg/net` | `PeerPool`, `Peer`, TCP/WS transports, P2P codec |
 | `navio-p2pmsg/stores` | `Store` interface, `MemoryStore`, `FileStore`, `IndexedDBStore` |
 | `navio-p2pmsg/archive` | `ArchiveClient`, the `getp2pmsgs`/`p2pmsgs` codecs |
+
+`navio-p2pmsg/net` also carries a full **BIP324 v2 transport** (ElligatorSwift
+over secp256k1, the rekeying ciphers, the handshake). Opt in per client with
+`transportVersion: 'v2'`; peers that only speak v1 are redialled automatically.
+Worth enabling before `syncArchive()`, which hands a node an FMD detection key.
 
 ## Development
 

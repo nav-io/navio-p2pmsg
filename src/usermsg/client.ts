@@ -121,6 +121,16 @@ export interface MessagingClientOptions {
   powWorkers?: number;
   /** Override the network's PoW difficulty (tests). */
   powBits?: number;
+  /**
+   * Link transport. Default 'v1'.
+   *
+   * 'v2' opens connections with BIP324, which encrypts and authenticates the
+   * whole link; peers that only speak v1 are redialled as v1 automatically.
+   * Worth turning on before `syncArchive()`, which hands a node an FMD
+   * detection key — on a v1 link anyone on the path collects it and can then
+   * test every future message addressed to us.
+   */
+  transportVersion?: 'v1' | 'v2' | 'v2-only';
   /** Chunks per message before `send` throws. Default 16. */
   maxChunks?: number;
   messageTtlMs?: number;
@@ -220,6 +230,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (keyring.previousPrekey) this.keys.addGraceInbox(keyring.previousPrekey.sk);
 
     const poolOpts: PeerPoolOptions = { network: o.network };
+    if (o.transportVersion !== undefined) poolOpts.transportVersion = o.transportVersion;
     if (o.peers) poolOpts.seeds = o.peers;
     if (o.targetPeers !== undefined) poolOpts.targetPeers = o.targetPeers;
     if (o.dnsSeeds) poolOpts.dnsSeeds = o.dnsSeeds;

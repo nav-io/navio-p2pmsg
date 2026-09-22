@@ -69,3 +69,6 @@ export {
   type TransportFactory,
 } from './pool.js';
 export { MockTransport, MockNode, type MockTransportOptions, type MockNodeOptions, type MockNodeEvents } from './mock-transport.js';
+
+// BIP324 v2 transport (ElligatorSwift, the rekeying ciphers, the handshake).
+export * from './bip324/index.js';

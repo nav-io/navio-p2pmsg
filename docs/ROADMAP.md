@@ -69,11 +69,20 @@ SDK side, done:
   against a real archiving naviod — recipient offline, message flagged and
   archived, recipient returns and retrieves it.
 
+- ✅ **BIP324** (decision 26) — `src/net/bip324/`. ElligatorSwift over
+  secp256k1 (the interview note saying X25519 was wrong), the two rekeying
+  ciphers, key derivation, framing, message ids and the handshake. Verified
+  against the BIP's own vectors and against a live naviod, which reports the
+  link as `transport_protocol_type: "v2"`. Opt in with
+  `transportVersion: 'v2'`.
+
 Still open in M1:
 
-- **BIP324 in the SDK is not started** (decision 26). Until it lands, an
-  archive query hands the detection key to anyone on the path, so a client
-  should only query a node it reaches over a trusted link.
+- **Turn v2 on by default.** It is opt-in because a v1 responder answers a v2
+  opening by hanging up rather than negotiating, so every v1 peer costs a
+  wasted dial and a redial. `PeerPool` handles that and remembers the result
+  per address, but flipping the default should wait until enough of the
+  network runs v2.
 - Confirm BIP324 works over the #462 WebSocket listener. `WebSocketSock` is a
   `Sock` and v2 transport detection is byte-stream based, so it is expected to
   work unchanged — expectation, not evidence, until a test proves it.

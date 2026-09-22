@@ -5,3 +5,6 @@ dist/
 browser-test/out/
 browser-test/harness.log
 browser-test/screenshot.png
+
+# scratch
+.tmpgen/

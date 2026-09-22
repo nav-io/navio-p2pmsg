@@ -18,6 +18,15 @@ export interface PeerPoolOptions {
   seeds?: string[];
   /** Number of handshaked peers to maintain. Default 3. */
   targetPeers?: number;
+  /**
+   * Transport to open connections with. Default 'v1'.
+   *
+   * 'v2' attempts BIP324 and, because a v1 responder answers a v2 opening by
+   * hanging up rather than negotiating, redials that address as v1 once and
+   * remembers the result. 'v2-only' skips the redial and simply refuses
+   * unencrypted peers.
+   */
+  transportVersion?: 'v1' | 'v2' | 'v2-only';
   /** DNS seed hostnames. Default `['seed.nav.io']` on mainnet, none elsewhere. */
   dnsSeeds?: string[];
   /** Resolve DNS seeds (Node only). Default: true under Node, false in browsers. */
@@ -77,6 +86,12 @@ export type PeerPoolEvents = {
 type AddressSource = 'seed' | 'dns' | 'gossip' | 'manual';
 
 interface BookEntry {
+  /**
+   * A BIP324 attempt to this address failed before the handshake completed, so
+   * it is almost certainly a v1-only node. Redial it as v1 rather than burning
+   * the address.
+   */
+  v2Failed?: boolean;
   address: string;
   services: bigint;
   source: AddressSource;
@@ -90,6 +105,8 @@ interface Slot {
   address: string;
   peer: Peer;
   connected: boolean;
+  /** Whether this attempt opened with a BIP324 handshake. */
+  triedV2: boolean;
 }
 
 const DEFAULT_DNS_SEEDS: Record<NetworkName, string[]> = {
@@ -143,6 +160,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       | 'maxBackoffMs'
       | 'maintainIntervalMs'
       | 'maxAddresses'
+      | 'transportVersion'
     >
   > & {
     dnsSeeds: string[];
@@ -183,6 +201,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       maxBackoffMs: options.maxBackoffMs ?? 60_000,
       maintainIntervalMs: options.maintainIntervalMs ?? 5_000,
       maxAddresses: options.maxAddresses ?? 1000,
+      transportVersion: options.transportVersion ?? 'v1',
       now: options.now ?? (() => Date.now()),
       random: options.random ?? (() => Math.random()),
     };
@@ -395,13 +414,18 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       return;
     }
     const id = `${address}#${++this.seq}`;
+    // A v1 responder never speaks first, so a v2 attempt against one dies as a
+    // dropped connection rather than an in-band fallback. Remember that and
+    // redial as v1.
+    const triedV2 = this.opts.transportVersion !== 'v1' && !entry.v2Failed;
     const peer = new Peer(transport, {
       ...this.opts.peerOptions,
       network: this.network,
       services: this.opts.services,
       userAgent: this.opts.userAgent,
+      transportVersion: triedV2 ? this.opts.transportVersion : 'v1',
     });
-    const slot: Slot = { id, address, peer, connected: false };
+    const slot: Slot = { id, address, peer, connected: false, triedV2 };
     this.slots.set(id, slot);
     this.dialing.add(address);
 
@@ -415,9 +439,17 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       this.dialing.delete(address);
       const e = this.book.get(address);
       if (e) {
-        if (wasConnected) e.failures = 0;
-        else e.failures++;
-        e.nextTryAt = this.opts.now() + this.backoff(e.failures);
+        if (!wasConnected && slot.triedV2 && !e.v2Failed && this.opts.transportVersion !== 'v2-only') {
+          // Not a bad address — just one that does not speak v2. Retry it
+          // immediately as v1 and do not count this against its backoff, or a
+          // network of v1 nodes would look like a network of dead ones.
+          e.v2Failed = true;
+          e.nextTryAt = this.opts.now();
+        } else {
+          if (wasConnected) e.failures = 0;
+          else e.failures++;
+          e.nextTryAt = this.opts.now() + this.backoff(e.failures);
+        }
       }
       if (!wasConnected && err && isIPv6Address(address) && isNoRouteError(err)) {
         this.v6DeprioritisedUntil = this.opts.now() + V6_DEPRIORITISE_MS;

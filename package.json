@@ -79,7 +79,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude '**/*.int.test.ts'",
-    "test:int": "vitest run src/**/*.int.test.ts",
+    "test:int": "vitest run .int.test.ts",
     "test:all": "vitest run",
     "prepublishOnly": "npm run typecheck && npm run build && npm test"
   },

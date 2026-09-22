@@ -140,8 +140,10 @@ detect and costly to emit.
 
 **Privacy of the query.** The detection key is the one secret in the exchange
 and it must not reach an on-path observer, which is why the SDK implements
-BIP324 (decision 26, `wire-v2.md`). A client SHOULD refuse to send a detection
-key over a v1 link unless the application explicitly allows it.
+BIP324 (decision 26, `wire-v2.md`). It is opt-in (`transportVersion: 'v2'`)
+while most of the network is still v1, so an application that calls
+`syncArchive()` should enable it — over a v1 link the key is sent in the
+clear.
 
 ## Client behaviour
 
@@ -179,7 +181,9 @@ archive.on('progress', ({ scanned, matched, complete }) => {});
 - [x] SDK end-to-end against a real archiving naviod
       (`src/archive/archive.int.test.ts`)
 - [ ] benchmark `FmdTest` to fix the caps in this document on real hardware
-- [ ] BIP324, so the detection key is not exposed on the path
+- [x] BIP324, so the detection key is not exposed on the path — implemented and
+      opt-in; `syncArchive()` over a v1 link still leaks it, so enable
+      `transportVersion: 'v2'` first
 
 Note the node deliberately never *sends* `getp2pmsgs`: retrieval belongs to the
 client holding the detection key, and a full node already stores its own

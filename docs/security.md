@@ -39,6 +39,9 @@ Everything above, plus:
 - **Your detection key at the precision you chose**, and therefore the ability
   to test *future* flags at that precision until you rotate the account epoch.
   This is inherent to FMD, not a flaw in the deployment.
+- On a **v1** link, so does anyone on the path — the query is not encrypted.
+  Enable `transportVersion: 'v2'` before using `syncArchive()`; it is not the
+  default yet only because most of the network still speaks v1.
 - The set of envelopes matching it — your real messages plus `2^-n` of
   everything else. It does not learn which are which.
 - Your IP, and your sync timing and frequency.
@@ -93,7 +96,7 @@ account epoch periodically, and prefer an archive node you run.
 | Group secrecy after removal | epoch rekey (`groups.md`) |
 | Group topic hidden | member-only group ECIES key |
 | Device revocation | account epoch rotation (`devices.md`) |
-| Link metadata protection | BIP324 |
+| Link metadata protection | BIP324 v2 transport (`transportVersion: 'v2'`) |
 | Sender authentication | per-message BLS signature over a verified device list |
 | Anonymous sending | unsigned frames, unchanged from v1 |
 
@@ -108,7 +111,7 @@ account epoch periodically, and prefer an archive node you run.
   Everything follows from it.
 - **Metadata resistance against a global passive adversary** correlating timing
   across the whole network.
-- **Post-quantum security.** BLS12-381, X25519 and the ratchet are all
+- **Post-quantum security.** BLS12-381, secp256k1 and the ratchet are all
   classical. A recorded transcript is a future problem.
 - **Group calls, or calls with any server assistance.**
 

@@ -1,4 +1,11 @@
-# navio-p2pmsg — design
+# navio-p2pmsg — design (v1, as shipped)
+
+> This document describes v1: what exists today. The v2 design — offline
+> delivery, groups, multi-device, double ratchet, chat schema, direct channel —
+> lives in [`docs/`](docs/README.md), starting with
+> [`docs/gap-analysis.md`](docs/gap-analysis.md) and
+> [`docs/ROADMAP.md`](docs/ROADMAP.md). Where the two disagree about the wire,
+> [`docs/wire-v2.md`](docs/wire-v2.md) supersedes the section below.
 
 Standalone TypeScript SDK that speaks the Navio **p2pmsg** encrypted broadcast
 bus directly over the Navio P2P network. No full node, no Electrum. The

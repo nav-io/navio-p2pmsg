@@ -12,6 +12,12 @@ Requires Navio nodes running nav-io/navio-core PRs #423 (user messaging), #461 (
 See `DESIGN.md` for the wire spec, the layer design and the C++ prerequisites
 (`NODE_P2PMSG_LEAF` service bit, `-p2pwsbind` WebSocket listener).
 
+`docs/` describes **v2**: the work that turns this from a messaging primitive
+into a foundation for a fully featured private chat app — offline delivery via
+fuzzy message detection and archive nodes, groups, multi-device, a double
+ratchet, a chat schema with causal ordering, and a direct channel for
+attachments and calls. Start at [docs/README.md](docs/README.md).
+
 ## Install
 
 ```bash

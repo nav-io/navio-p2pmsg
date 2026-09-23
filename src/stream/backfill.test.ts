@@ -94,10 +94,19 @@ describe('history backfill', () => {
   });
 
   it('batches a long history and still completes', async () => {
-    const many = Array.from({ length: SYNC_BATCH_SIZE * 2 + 5 }, (_, i) => signedEntry(`m${i}`, BigInt(i + 1)));
+    // Entries with no proof: batching is about how the frames are cut into
+    // messages, not about what is in them, and a signature check per entry
+    // would make this test hundreds of BLS verifications long for nothing.
+    // Verification has its own cases above.
+    const many = Array.from({ length: SYNC_BATCH_SIZE * 2 + 5 }, (_, i) => ({
+      frame: serializeChatFrame(frameOf(`m${i}`, BigInt(i + 1))),
+      receivedAt: 1000 + i,
+    }));
     const { client } = pair(many);
     const res = await client.fetch(convId, { timeoutMs: 20000, limit: many.length });
-    expect(res.verified).toHaveLength(many.length);
+    expect(res.unverified).toHaveLength(many.length);
+    // The order the server sent them in survives the batching.
+    expect(res.unverified.map((e) => e.receivedAt)).toEqual(many.map((e) => e.receivedAt));
   });
 
   it('refuses two fetches at once and times out with no server', async () => {

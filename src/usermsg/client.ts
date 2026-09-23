@@ -386,6 +386,11 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (o.transportFactory) poolOpts.transportFactory = o.transportFactory;
     if (o.userAgent) poolOpts.userAgent = o.userAgent;
     if (o.services !== undefined) poolOpts.services = o.services;
+    // One clock for the whole client. The pool times its backoffs with it, and
+    // each peer measures its clock offset against it — the number the bus then
+    // uses to correct our envelope stamps. Measured against one clock and
+    // applied to another, that correction is worse than none.
+    if (o.now) poolOpts.now = o.now;
     this.pool = o.pool ?? new PeerPool(poolOpts);
 
     this.grinder = new PowGrinder(o.powWorkers !== undefined ? { workers: o.powWorkers } : {});
@@ -394,6 +399,12 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       sink: this.pool,
       grinder: this.grinder,
       network: o.network,
+      // The application's clock, not the process's: `now` is the injection
+      // point for the whole client, and an envelope stamped from a different
+      // clock than the frame inside it is a contradiction waiting to be
+      // debugged. The bus still corrects it with the peer offset on top,
+      // which is what makes a device with a wrong system clock work at all.
+      now: () => Math.floor(this.now() / 1000),
       clockOffsetSeconds: () => this.pool.medianClockOffset(),
     };
     if (o.powBits !== undefined) busOpts.powBits = o.powBits;
@@ -486,6 +497,19 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    */
   detectionKey(precision: number): Uint8Array {
     return extractDetectionKey(this.keyring.fmd, precision);
+  }
+
+  /**
+   * Peers this client is currently handshaked with.
+   *
+   * Empty is a real state, not an error: the pool redials, and a send made
+   * while it is empty sits in the outbox until there is somewhere to put it.
+   * An application that wants to say "offline" should say it from here.
+   */
+  peers(): Array<{ id: string; address: string; services: bigint }> {
+    const pool = this.pool;
+    if (!(pool instanceof PeerPool)) return [];
+    return pool.peers().map((p) => ({ id: p.id, address: p.address, services: p.services }));
   }
 
   /**

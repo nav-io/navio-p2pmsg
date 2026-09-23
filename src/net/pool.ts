@@ -419,6 +419,12 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
     // redial as v1.
     const triedV2 = this.opts.transportVersion !== 'v1' && !entry.v2Failed;
     const peer = new Peer(transport, {
+      // The pool's clock, unless the caller overrode it per peer. A peer
+      // measures its clock offset against ours, and that number is only
+      // meaningful if "ours" is the same clock the rest of the client stamps
+      // with — otherwise the correction is computed against one clock and
+      // applied to another.
+      now: this.opts.now,
       ...this.opts.peerOptions,
       network: this.network,
       services: this.opts.services,

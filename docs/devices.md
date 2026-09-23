@@ -136,13 +136,39 @@ What syncs, and how:
 | state | mechanism |
 |---|---|
 | incoming messages | free — every device decrypts the same envelope |
-| **sent** messages | a self-addressed mirror copy (below) |
-| read state | chat `RECEIPT` frames, self-addressed, coalesced |
-| contacts, blocklist | self-addressed, on change |
-| group epoch secrets | self-addressed, on change |
-| device list | bundle v2 |
-| history backfill | direct channel (`stream.md`) |
+| **sent** messages | a self-addressed mirror copy (below), ingested by the chat layer |
+| group epoch secrets | membership frames, over the mirror |
+| contacts, groups, read state | device-to-device catch-up over a direct channel |
+| history | backfill over a direct channel (`stream.md`) |
+| device list | bundle, republished to contacts when it changes |
+| known list, blocklist | **not synced** — see below |
 | drafts | not synced |
+
+**Catch-up, not live propagation.** A device that was online when something
+changed hears about it the ordinary way; a device that was not has no replay
+to draw on, because none of this was a message. `serveStateSync` /
+`stateSyncFrom` move it between devices over the same direct channel history
+uses, and everything merged is checked on arrival rather than trusted: a
+contact's bundle carries its own signature, a group state is hash-chained and
+validated against what the receiver already holds, and read state is unioned,
+which is the only direction it moves.
+
+The known list and the blocklist are deliberately absent. A set with no
+tombstones can only be unioned, and a union is wrong in both directions here —
+it would resurrect a contact the user removed, or forget an unblock. That needs
+a change log with deletions, and shipping a union that silently does the
+opposite of what the user asked would be worse than shipping nothing.
+
+**A new device has to be announced.** A contact holding the device list from
+before a device existed rejects everything that device signs — correctly, since
+a device that is not on the list is indistinguishable from a revoked one. So
+`confirmPairing` republishes the bundle to every contact (pass
+`notifyContacts: false` to skip it). A contact that misses the announcement
+recovers on its own: a frame naming an unknown device triggers a re-discovery,
+rate-limited to once a minute per contact, since an unknown device key is
+exactly what an attacker would send in a loop to make us discover on demand.
+The cost of relying on that alone is the new device's first message to each
+contact.
 
 **One-shot reply keys are suspended.** A v1 sender takes the one-shot reply
 key the recipient published and addresses its next message to it. That key

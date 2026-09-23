@@ -27,6 +27,8 @@ const MAX_MIRROR_BYTES = 3000;
 const DISCOVERY_ATTEMPTS = 3;
 /** Answers to one reply key inside the rate-limit window; matches the retries. */
 const PREKEY_REPLIES_PER_KEY = 3;
+/** Minimum gap between re-discoveries prompted by an unknown device key. */
+const DEVICE_REFRESH_COOLDOWN_MS = 60_000;
 /** How long a burst of sends accumulates before one mirror goes out. */
 const MIRROR_FLUSH_MS = 30_000;
 
@@ -344,6 +346,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private retrying = false;
   private closed = false;
   private readonly lastPrekeyReply = new Map<string, { at: number; count: number }>();
+  private readonly lastDeviceRefresh = new Map<string, number>();
 
   private constructor(o: MessagingClientOptions, store: Store, keyring: Keyring, contacts: Contacts, outbox: Outbox) {
     super();
@@ -1284,7 +1287,11 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    * two strings match. Signs it into the account, publishes the updated device
    * list, and sends it the account secret.
    */
-  async confirmPairing(devicePub: Uint8Array, caps = 0): Promise<void> {
+  async confirmPairing(
+    devicePub: Uint8Array,
+    caps = 0,
+    opts: { notifyContacts?: boolean } = {},
+  ): Promise<void> {
     const pending = this.pairingRequests.get(toHex(devicePub));
     if (!pending) throw new Error('no pairing request from that device');
     const identity = this.keyring.requireIdentitySecret();
@@ -1353,6 +1360,15 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const body = serializeUserMsgFrame({ topic: TOPIC_PAIR, body: inner });
     await this.bus.send(USER_DATA_KIND, pending.replyPub, body, { stem: true });
     this.pairingRequests.delete(toHex(devicePub));
+
+    // Tell our contacts about the new device, by republishing the bundle the
+    // list travels in. A contact holding the list from before this device
+    // existed rejects everything it signs — correctly, since a device that is
+    // not on the list is exactly what a revoked one looks like. They would
+    // find out eventually, when a dropped frame made them discover again, but
+    // "eventually" means the new device's first message to each contact is
+    // lost. Pass `notifyContacts: false` to take that trade deliberately.
+    if (opts.notifyContacts !== false) await this.announceBundle();
   }
 
   /** A device announced itself on one of our pairing topics. */
@@ -1574,16 +1590,36 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    */
   private async deviceIsListed(identity: Uint8Array, devicePub: Uint8Array): Promise<boolean> {
     const raw = this.contacts.get(identity)?.deviceList;
-    if (!raw || raw.length === 0) {
-      // Ask for it, so the retry has a chance of landing.
-      void this.discover(identity).catch(() => {});
-      return false;
-    }
     try {
-      return isListedDevice(parseDeviceList(raw), devicePub);
+      if (raw && raw.length > 0 && isListedDevice(parseDeviceList(raw), devicePub)) return true;
     } catch {
-      return false;
+      // A list we cannot parse is a list we do not have.
     }
+    // Either we hold no list, or we hold one that predates this device. Both
+    // look the same from here and both are fixed the same way: ask again. A
+    // STALE list is the one that bites — pair a phone, and every contact
+    // holding the list from before it existed drops everything the phone
+    // sends, silently and for as long as nothing else makes them look.
+    this.refreshDeviceList(identity);
+    return false;
+  }
+
+  /**
+   * Re-discover a contact, at most once a minute.
+   *
+   * The rate limit is the point: this fires on a frame naming a device we do
+   * not know, and that is exactly what an attacker would send in a loop to
+   * make us discover on demand.
+   */
+  private refreshDeviceList(identity: Uint8Array): void {
+    const key = toHex(identity);
+    const last = this.lastDeviceRefresh.get(key) ?? 0;
+    if (this.now() - last < DEVICE_REFRESH_COOLDOWN_MS) return;
+    this.lastDeviceRefresh.set(key, this.now());
+    if (this.lastDeviceRefresh.size > 1024) this.lastDeviceRefresh.clear();
+    void this.discover(identity).catch(() => {
+      // Offline or unreachable. The next frame from that device tries again.
+    });
   }
 
   private async onPrekeyResponse(frame: AuthFrame, m: InboundMessage): Promise<void> {

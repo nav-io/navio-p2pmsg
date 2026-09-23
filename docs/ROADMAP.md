@@ -227,10 +227,17 @@ Still open in M4:
   where our other devices could not read. An account with more than one device
   keeps the conversation on the account prekey instead, at the cost of that
   session's forward secrecy, until the ratchet lands.
-- State sync for contacts and read state still rides only the ordinary message
-  path; there is no catch-up for a device that was offline while those
-  changed. Group epoch secrets now arrive over the mirror, but only while the
-  device is online to hear it.
+- ✅ **Device state sync** (`src/stream/statesync.ts`). Contacts, group states
+  with their epoch secrets, and read state move device to device over the same
+  direct channel history uses, and every item is checked on arrival: a bundle
+  by its own signature, a group state against the chain we hold, read state by
+  union. The known list and the blocklist are deliberately not carried — a set
+  with no tombstones can only be unioned, and a union would resurrect a removed
+  contact or forget an unblock.
+- ✅ **Announcing a new device.** A contact holding the device list from before
+  a device existed rejects everything it signs, so `confirmPairing`
+  republishes the bundle to contacts, and a frame naming an unknown device
+  triggers a rate-limited re-discovery as the fallback.
 - ✅ **Closing the window after a revoke.** Two parts. The bus inbox key now
   moves with the keyring, which it did not: revocation republished a prekey
   the bus had never been told about, so the account went deaf to every sender

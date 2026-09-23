@@ -410,6 +410,57 @@ describe.skipIf(!haveBinary)('end to end: devices across a relay', () => {
     expect(await secondary.chat.unreadCount(convId)).toBe(0);
   }, 600000);
 
+  it('syncs contacts, groups and read state to a device that was not there', async () => {
+    const primary = await account(70, nodes[0]!);
+    const peer = await account(71, nodes[1]!);
+    await introduce(primary, peer);
+
+    // All of this happens before the second device exists, and none of it is
+    // a message, so nothing replays it: a contact learned, a group created,
+    // a conversation read.
+    const heard = waitFor<ChatEvents, 'message'>(primary.chat, 'message', (e) => e.message.text === 'read this');
+    await peer.chat.sendText(primary.chat.identity, 'read this');
+    await heard;
+    await primary.chat.markRead(peer.chat.identity);
+    const joined = waitFor<ChatEvents, 'group'>(peer.chat, 'group');
+    const groupId = await primary.chat.createGroup('before the phone', [peer.chat.identity]);
+    await joined;
+
+    const secondary = await pairDevice(primary, nodes[1]!);
+    expect(secondary.client.contacts.get(decodeIdentity(peer.chat.identity))?.bundle).toBeUndefined();
+    expect(await secondary.chat.groupState(groupId)).toBeUndefined();
+
+    const [side, other] = loopbackPair();
+    const server = primary.chat.serveStateSync(side.channel('control'));
+    try {
+      const res = await secondary.chat.stateSyncFrom(other.channel('control'), { timeoutMs: 30000 });
+      expect(res.contacts).toBe(1);
+      expect(res.groups).toBe(1);
+      expect(res.conversations).toBe(1);
+      expect(res.rejected).toBe(0);
+    } finally {
+      server.close();
+      side.close();
+      other.close();
+    }
+
+    // The contact's bundle carried its own signature, so the phone verified it
+    // rather than trusting the desktop.
+    expect(secondary.client.contacts.get(decodeIdentity(peer.chat.identity))?.bundle).toBeDefined();
+    // Read state is a union and only moves forward.
+    expect(await secondary.chat.unreadCount(secondary.chat.conversationWith(peer.chat.identity))).toBe(0);
+
+    // And the group is real on the phone: it holds the epoch secret, which is
+    // the only thing that lets it speak to the group at all.
+    const atPeer = waitFor<ChatEvents, 'message'>(
+      peer.chat,
+      'message',
+      (e) => e.message.text === 'the phone caught up',
+    );
+    await secondary.chat.sendGroupText(groupId, 'the phone caught up');
+    await atPeer;
+  }, 600000);
+
   it('carries a payment request and its receipt between nodes', async () => {
     const alice = await account(64, nodes[0]!);
     const bob = await account(65, nodes[1]!);

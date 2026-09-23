@@ -12,7 +12,7 @@ import { fromUtf8, toHex, utf8 } from '../common/bytes.js';
 import type { Store } from '../stores/store.js';
 import { Writer, Reader } from '../common/serialize.js';
 import type { IncomingMessage, MessagingClient } from '../usermsg/client.js';
-import { decodeIdentity, encodeIdentity } from '../usermsg/bundle.js';
+import { decodeIdentity, encodeBundle, encodeIdentity, parseBundle, serializeBundle } from '../usermsg/bundle.js';
 import { ConversationDag, type Gap } from './dag.js';
 import {
   type AttachRef,
@@ -44,6 +44,13 @@ import {
 import { ChatStore, type MessageView, type StoredMessage } from './store.js';
 import { decryptFile, encryptFile, type FileClient, type FileServer } from '../stream/file.js';
 import { BackfillClient, BackfillServer, type SyncEntry } from '../stream/backfill.js';
+import {
+  type GroupSnapshot,
+  mergeHeads,
+  type ReadSnapshot,
+  StateSyncClient,
+  StateSyncServer,
+} from '../stream/statesync.js';
 import type { StreamChannel } from '../stream/transport.js';
 
 /**
@@ -574,6 +581,110 @@ export class ChatClient extends Emitter<ChatEvents> {
         unverified: res.unverified.length,
         rejected: res.rejected,
       };
+    } finally {
+      client.close();
+    }
+  }
+
+  /**
+   * Serve the state around the messages — contacts, groups, read state — to
+   * another device of this account. Like `serveBackfill`, the caller owns the
+   * channel and decides who is on the other end.
+   */
+  serveStateSync(channel: StreamChannel): StateSyncServer {
+    return new StateSyncServer(channel, {
+      contacts: () =>
+        Promise.resolve(
+          this.client.contacts
+            .all()
+            .filter((c) => c.bundle !== undefined)
+            .map((c) => serializeBundle(c.bundle!)),
+        ),
+      groups: async () => {
+        const out: GroupSnapshot[] = [];
+        for (const state of await this.groups()) {
+          const prefix = `group/${toHex(state.groupId)}/epoch/`;
+          const secrets: { epoch: number; secret: Uint8Array }[] = [];
+          for (const e of await this.store.list(NS, prefix)) {
+            secrets.push({ epoch: parseInt(e.key.slice(prefix.length), 16), secret: e.value });
+          }
+          out.push({ state: serializeGroupState(state), secrets });
+        }
+        return out;
+      },
+      read: async () => {
+        const out: ReadSnapshot[] = [];
+        for (const convId of await this.chat.conversations()) {
+          const meta = await this.chat.meta(convId);
+          if (meta.readHeads.length > 0) out.push({ convId, heads: meta.readHeads });
+        }
+        return out;
+      },
+    });
+  }
+
+  /**
+   * Ask another device of this account for the state around the messages and
+   * merge it in.
+   *
+   * Everything merged is checked here rather than taken on trust: a contact's
+   * bundle carries its own signature, a group state is hash-chained and
+   * validated against what we already hold, and read state is unioned, which
+   * is the only direction it moves. The known list and the blocklist are not
+   * carried at all — see `../stream/statesync.js` for why.
+   */
+  async stateSyncFrom(
+    channel: StreamChannel,
+    opts: { sections?: number; timeoutMs?: number } = {},
+  ): Promise<{ contacts: number; groups: number; conversations: number; rejected: number }> {
+    const client = new StateSyncClient(channel);
+    try {
+      const res = await client.fetch(opts);
+      let contacts = 0;
+      let groups = 0;
+      let conversations = 0;
+      let rejected = res.malformed;
+
+      for (const raw of res.contacts) {
+        try {
+          // addContact verifies the bundle, and kicks off discovery for the
+          // clue key, which is not in a basic bundle and is 1152 bytes.
+          await this.client.addContact(encodeBundle(parseBundle(raw)));
+          contacts++;
+        } catch {
+          rejected++;
+        }
+      }
+
+      for (const snap of res.groups) {
+        try {
+          const state = parseGroupState(snap.state);
+          const previous = await this.groupState(state.groupId);
+          // Same gate an arriving membership frame passes: a state that does
+          // not chain to the one we hold is a missed update or two histories,
+          // and neither is something to merge.
+          if (!validateGroupState(state, previous).ok) {
+            rejected++;
+            continue;
+          }
+          for (const e of snap.secrets) await this.storeEpochSecret(state.groupId, e.epoch, e.secret);
+          const current = snap.secrets.find((e) => e.epoch === state.epoch);
+          if (current) await this.adoptGroup(state, current.secret);
+          groups++;
+        } catch {
+          rejected++;
+        }
+      }
+
+      for (const snap of res.read) {
+        const meta = await this.chat.meta(snap.convId);
+        const merged = mergeHeads(meta.readHeads, snap.heads);
+        if (merged.length === meta.readHeads.length) continue;
+        await this.chat.setMeta({ ...meta, readHeads: merged, unread: 0 });
+        conversations++;
+      }
+
+      return { contacts, groups, conversations, rejected };
     } finally {
       client.close();
     }

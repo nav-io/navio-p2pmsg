@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { randomBytes, utf8 } from '../common/bytes.js';
 import { generateSecret, publicKey } from './bls.js';
 import { BusClient, type EnvelopeSink, type InboundMessage, PayloadTooLarge } from './client.js';
-import { parseEnvelope, serializeEnvelope } from './envelope.js';
+import { expectedPayloadHash, parseEnvelope, replayKey, serializeEnvelope } from './envelope.js';
+import { FMD_FLAG_SIZE } from './fmd.js';
 import { BusKeys } from './keyring.js';
 import { PowGrinder } from './pow-grinder.js';
-import { withNonce } from './pow.js';
+import { grindSync, withNonce } from './pow.js';
 
 class FakeSink implements EnvelopeSink {
   sent: Array<{ bytes: Uint8Array; stem: boolean }> = [];
@@ -74,6 +75,45 @@ describe('BusClient', () => {
     const regrind = serializeEnvelope({ ...env, pow: withNonce(env.pow, env.pow.nonce + 256n) });
     const r = b.client.onWire(3, false, regrind);
     expect(['replay', 'badpow']).toContain(r);
+  });
+
+  it('a re-flagged copy of a delivered envelope is not delivered again', async () => {
+    // The flag is routing metadata and it is not secret: anyone who saw the
+    // envelope can rewrite it, regrind the (cheap, flag-covering) proof of
+    // work once, and put it back on the bus. A relay tells the two apart on
+    // purpose, so the copy propagates — but the recipient must see one
+    // message, not two.
+    const a = makeClient();
+    const b = makeClient();
+    let calls = 0;
+    b.client.on(7, () => calls++);
+    const flag = randomBytes(FMD_FLAG_SIZE);
+    const bytes = await a.client.send(7, b.keys.inboxPublic!, utf8('once'), { stem: false, flag });
+    expect(b.client.onWire(1, false, bytes)).toBe('accepted');
+    await b.client.drain();
+    expect(calls).toBe(1);
+
+    // Same ciphertext, somebody else's flag, freshly ground.
+    const env = parseEnvelope(bytes);
+    const reflagged: typeof env = { ...env, flag: randomBytes(FMD_FLAG_SIZE) };
+    reflagged.pow = { ...env.pow, payloadHash: expectedPayloadHash(reflagged), nonce: 0n };
+    const nonce = grindSync(reflagged.pow, BITS);
+    expect(nonce).not.toBeUndefined();
+    reflagged.pow = withNonce(reflagged.pow, nonce!);
+    // It is a valid, distinct envelope on the wire...
+    expect(replayKey(reflagged)).not.toEqual(replayKey(env));
+    // ...and still the same message here.
+    expect(b.client.onWire(2, false, serializeEnvelope(reflagged))).toBe('replay');
+    await b.client.drain();
+    expect(calls).toBe(1);
+
+    // Stripping the flag entirely is the same trick.
+    const stripped: typeof env = { ...env, flag: new Uint8Array(0) };
+    stripped.pow = { ...env.pow, payloadHash: expectedPayloadHash(stripped), nonce: 0n };
+    stripped.pow = withNonce(stripped.pow, grindSync(stripped.pow, BITS)!);
+    expect(b.client.onWire(3, false, serializeEnvelope(stripped))).toBe('replay');
+    await b.client.drain();
+    expect(calls).toBe(1);
   });
 
   it('our own echoed envelope is ignored', async () => {

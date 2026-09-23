@@ -3,7 +3,8 @@
  * `p2pmsg::Transport` minus relaying (a leaf relays nothing).
  *
  * Inbound (`onWire`): parse -> pow version -> pow.kind == kind ->
- * payload_hash == SHA256(MsgHash || flag) -> PoW -> timestamp -> replay; then
+ * payload_hash == SHA256(MsgHash || flag) -> PoW -> timestamp -> duplicate
+ * check on the ciphertext; then
  * trial-decrypt off the caller's stack and dispatch to the handler registered
  * for the kind.
  *
@@ -17,7 +18,7 @@ import {
   MAX_ENVELOPE_BYTES,
   MAX_FLAG_BYTES,
   parseEnvelope,
-  replayKey,
+  deliveryKey,
   serializeEnvelope,
 } from './envelope.js';
 import { type BusKeys, type RecipientClass } from './keyring.js';
@@ -124,7 +125,8 @@ export class BusClient {
   readonly keys: BusKeys;
   readonly powBits: number;
   private readonly sink: EnvelopeSink;
-  private readonly replay: ReplayCache;
+  /** Ciphertexts already dispatched, so a re-flagged copy is not delivered twice. */
+  private readonly delivered: ReplayCache;
   private readonly handlers = new Map<number, Set<MessageHandler>>();
   private readonly clockOffset: () => number;
   private readonly tolerance: number;
@@ -139,7 +141,7 @@ export class BusClient {
     this.keys = opts.keys;
     this.sink = opts.sink;
     this.powBits = opts.powBits ?? NETWORK_POW_BITS[opts.network ?? 'mainnet'];
-    this.replay = new ReplayCache(opts.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
+    this.delivered = new ReplayCache(opts.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
     this.clockOffset = opts.clockOffsetSeconds ?? (() => 0);
     this.tolerance = opts.timestampToleranceSeconds ?? POW_TIMESTAMP_TOLERANCE_SECONDS;
     this.wallClock = opts.now ?? (() => Math.floor(Date.now() / 1000));
@@ -205,7 +207,12 @@ export class BusClient {
     if (!bytesEqual(env.pow.payloadHash, expectedPayloadHash(env))) return 'badpow';
     if (!checkPoW(env.pow, this.powBits)) return 'badpow';
     if (!archived && !checkTimestamp(env.pow, this.now(), this.tolerance)) return 'stale';
-    if (!this.replay.add(replayKey(env))) return 'replay';
+    // Keyed on the CIPHERTEXT, not on the wire identity. A relay tells two
+    // flaggings of one ciphertext apart on purpose — that is how a sender
+    // re-flags a retransmission for a recipient whose clue key rotated — but
+    // to a recipient they are the same message, and anyone who saw an envelope
+    // can rewrite its flag, regrind once and have it dispatched again.
+    if (!this.delivered.add(deliveryKey(env))) return 'replay';
     if (this.closed) return 'accepted';
     this.decryptQueue = this.decryptQueue
       .then(() => new Promise<void>((r) => setTimeout(r, 0)))
@@ -277,7 +284,7 @@ export class BusClient {
     const env: Envelope = { kind, pow, flag, enc };
     const bytes = serializeEnvelope(env);
     // Our own message will be fluffed back to us by peers; pre-mark it seen.
-    this.replay.add(replayKey(env));
+    this.delivered.add(deliveryKey(env));
     this.sink.broadcast(bytes, { stem: opts.stem ?? true });
     return bytes;
   }

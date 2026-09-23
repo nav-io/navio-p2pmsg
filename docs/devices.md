@@ -125,7 +125,12 @@ Pairing offers expire after 5 minutes and are single-use.
 
    An unsolicited bundle arrives on `_p2pmsg/bundle` and is accepted only from
    the identity it names, so nobody can push somebody else's stale bundle to
-   roll a contact's keys backwards.
+   roll a contact's keys backwards. A bundle also never goes backwards on its
+   own account: `fmdEpoch` is the account epoch, and one older than the epoch
+   already held is refused, however well signed. This is not only an attack —
+   discovery re-sends while it waits, so an answer to an earlier attempt can
+   arrive after a rotation, and taking it would put the sender back on the
+   very keys the revoked device still holds.
 
 Revocation is forward-only. It cannot unread what the device already read.
 

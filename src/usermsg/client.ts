@@ -630,6 +630,23 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   private async learnBundle(bundle: Bundle | ExtendedBundle): Promise<void> {
     if (!verifyBundle(bundle)) throw new Error('bundle signature invalid');
     const existing = this.contacts.get(bundle.identity);
+    // NEVER go backwards, for the same reason the device list must not: a
+    // signed bundle stays valid forever, so an old one can replace a newer
+    // one and put us back on keys the contact has moved off. It is not even a
+    // deliberate attack in the usual case — discovery re-sends while it waits,
+    // and an answer to an earlier attempt can arrive after a rotation, which
+    // is exactly how a revoked device kept receiving mail.
+    //
+    // `fmdEpoch` is the account epoch, so it orders bundles. A basic bundle
+    // carries no epoch and cannot be ordered; it arrives only when a user
+    // pastes a `navmsg1…`, which is a deliberate act, so it is taken as given.
+    if (
+      isExtendedBundle(bundle) &&
+      existing?.clueKeyEpoch !== undefined &&
+      bundle.fmdEpoch < existing.clueKeyEpoch
+    ) {
+      return;
+    }
     const changed = !existing?.bundle || !equal(existing.bundle.prekey, bundle.prekey);
     await this.contacts.setBundle(bundle);
     if (isExtendedBundle(bundle)) {

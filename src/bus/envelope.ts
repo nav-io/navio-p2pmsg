@@ -60,14 +60,34 @@ export function expectedPayloadHash(env: Envelope): Uint8Array {
 }
 
 /**
- * Replay-cache key: `SHA256(u8 kind || payload_hash)`. Nonce-independent, and
- * it covers the flag — two envelopes with identical ciphertext and different
- * flags are distinct messages. Deliberate: it lets a sender re-flag a
- * retransmission for a recipient whose clue key rotated, and each variant costs
- * a fresh grind.
+ * Relay identity: `SHA256(u8 kind || payload_hash)`. Nonce-independent, and it
+ * covers the flag — two envelopes with identical ciphertext and different
+ * flags are distinct on the wire. Deliberate: it lets a sender re-flag a
+ * retransmission for a recipient whose clue key rotated, and each variant
+ * costs a fresh grind. Matches navio-core's relay cache byte for byte.
  */
 export function replayKey(env: Envelope): Uint8Array {
   const h = env.pow.payloadHash;
+  const buf = new Uint8Array(1 + h.length);
+  buf[0] = env.kind & 0xff;
+  buf.set(h, 1);
+  return sha256(buf);
+}
+
+/**
+ * Delivery identity: `SHA256(u8 kind || MsgHash)` — the CIPHERTEXT, with the
+ * flag left out.
+ *
+ * Relay identity and delivery identity are not the same question. On the wire
+ * a re-flagged copy is a different message and should propagate, so an offline
+ * recipient whose clue key rotated can still be reached. To a recipient it is
+ * the same message: the flag is routing metadata, and anyone who saw an
+ * envelope can strip or rewrite the flag, regrind once and have it dispatched
+ * again. Keying delivery on the ciphertext makes that a duplicate, which is
+ * what it is.
+ */
+export function deliveryKey(env: Envelope): Uint8Array {
+  const h = packetMsgHash(env.enc);
   const buf = new Uint8Array(1 + h.length);
   buf[0] = env.kind & 0xff;
   buf.set(h, 1);

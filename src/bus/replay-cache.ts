@@ -1,4 +1,4 @@
-/** Bounded LRU set of replay keys (hex of `replayKey(envelope)`). */
+/** Bounded LRU set of envelope keys, held as hex. */
 import { toHex } from '../common/bytes.js';
 
 export const DEFAULT_REPLAY_CAPACITY = 65536;

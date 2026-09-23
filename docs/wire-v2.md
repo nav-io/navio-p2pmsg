@@ -92,6 +92,18 @@ re-flag a retransmission for a recipient whose clue key changed. It is also a
 small amplification surface, bounded by the fact that each variant costs a
 fresh proof of work.
 
+**Relay identity is not delivery identity.** The flag is routing metadata and
+it is not secret: anyone who saw an envelope can strip or rewrite the flag,
+regrind once, and put it back on the bus. Under a single cache that copy is a
+new message everywhere — relayed again, and dispatched to the recipient again.
+
+So a recipient keys its duplicate check on the CIPHERTEXT,
+`SHA256(u8 kind ‖ MsgHash)`, while relays keep the flag-covering key. The
+re-flagged copy still propagates, which is what the re-flagging rule is for,
+and the recipient sees one message. `replayKey()` and `deliveryKey()` in
+`src/bus/envelope.ts` are the two, and navio-core's relay cache matches the
+first byte for byte.
+
 ## Delivery is an attempt, not a promise
 
 The bus is a flood network with Dandelion++ stem routing in front of it. A

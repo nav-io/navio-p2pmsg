@@ -590,6 +590,30 @@ describe('device revocation', () => {
     expect(verifyDeviceList(primary.keyring.identity.pub, list).ok).toBe(true);
   }, 40000);
 
+  it('refuses a bundle from before an epoch it already knows about', async () => {
+    // Discovery re-sends while it waits, so an answer to an earlier attempt
+    // can arrive after a rotation. A signed bundle stays valid forever, so
+    // taking it would put the sender back on keys the account has moved off —
+    // and those are exactly the keys a revoked device still holds.
+    const hub = new Hub();
+    const { primary, device } = await accountWithTwoDevices(hub, 76);
+    const peer = await mk(hub, 77);
+    await peer.addContact(primary.bundle());
+    await peer.discover(primary.identity);
+    const stale = primary.keyring.extendedBundle();
+
+    await primary.revokeDevice(device.pub);
+    await peer.discover(primary.identity);
+    const current = toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey);
+    expect(current).toBe(toHex(primary.keyring.prekey.pub));
+
+    // The stale answer, arriving late and perfectly well signed.
+    // Reaching into the private handler: this is the path a late discovery
+    // answer takes, and there is no way to time one deterministically.
+    await (peer as unknown as { learnBundle(b: unknown): Promise<void> }).learnBundle(stale);
+    expect(toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey)).toBe(current);
+  }, 40000);
+
   it('moves the key the bus listens on, not just the one it publishes', async () => {
     // Rotating the keyring alone republishes a prekey nothing decrypts: every
     // sender that then discovers the new bundle addresses a key the bus was

@@ -9,6 +9,7 @@ import {
   MAX_ENVELOPE_BYTES,
   MAX_FLAG_BYTES,
   parseEnvelope,
+  deliveryKey,
   replayKey,
   serializeEnvelope,
 } from './envelope.js';
@@ -94,6 +95,23 @@ describe('envelope', () => {
     b.pow = { ...a.pow, payloadHash: expectedPayloadHash(b) };
     expect(packetMsgHash(a.enc)).toEqual(packetMsgHash(b.enc));
     expect(replayKey(a)).not.toEqual(replayKey(b));
+  });
+
+  it('deliveryKey does NOT separate them: to a recipient it is one message', () => {
+    // The flag is routing metadata. Anyone who saw an envelope can rewrite it
+    // and regrind once, so keying delivery on the wire identity would let a
+    // bystander have the same message dispatched again and again.
+    const a = makeEnvelope(10, 7, randomBytes(FMD_FLAG_SIZE));
+    const reflagged = { ...a, flag: randomBytes(FMD_FLAG_SIZE) };
+    reflagged.pow = { ...a.pow, payloadHash: expectedPayloadHash(reflagged) };
+    const stripped = { ...a, flag: new Uint8Array(0) };
+    stripped.pow = { ...a.pow, payloadHash: expectedPayloadHash(stripped) };
+    expect(deliveryKey(reflagged)).toEqual(deliveryKey(a));
+    expect(deliveryKey(stripped)).toEqual(deliveryKey(a));
+    // A different ciphertext is still a different message.
+    expect(deliveryKey(makeEnvelope(10, 7, a.flag))).not.toEqual(deliveryKey(a));
+    // And the kind is part of it, as it is for the wire identity.
+    expect(deliveryKey({ ...a, kind: 8 })).not.toEqual(deliveryKey(a));
   });
 });
 

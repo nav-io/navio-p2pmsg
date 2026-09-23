@@ -129,6 +129,7 @@ export class ChatClient extends Emitter<ChatEvents> {
    *  with Emitter's own `off`. */
   private unsubscribe: (() => void) | undefined;
   private unsubscribeEpoch: (() => void) | undefined;
+  private unsubscribeMirror: (() => void) | undefined;
   private closed = false;
 
   private constructor(
@@ -154,6 +155,13 @@ export class ChatClient extends Emitter<ChatEvents> {
     c.unsubscribe = o.client.on('message', (m) => {
       void c.onMessage(m).catch((e: unknown) => c.emit('error', e instanceof Error ? e : new Error(String(e))));
     });
+    // What our other devices send is part of this conversation too. Without
+    // this a second device shows half a conversation — and never learns about
+    // a group the first one created, because the membership frame that
+    // carries the epoch secret goes to the members, not to our own devices.
+    c.unsubscribeMirror = o.client.on('mirrored', (m) => {
+      void c.onMirrored(m).catch((e: unknown) => c.emit('error', e instanceof Error ? e : new Error(String(e))));
+    });
     return c;
   }
 
@@ -163,6 +171,8 @@ export class ChatClient extends Emitter<ChatEvents> {
     this.unsubscribe = undefined;
     this.unsubscribeEpoch?.();
     this.unsubscribeEpoch = undefined;
+    this.unsubscribeMirror?.();
+    this.unsubscribeMirror = undefined;
   }
 
   /** Our own identity, `navid1…`. */
@@ -390,6 +400,48 @@ export class ChatClient extends Emitter<ChatEvents> {
     } else if (body.op === ContactOp.ACCEPT) {
       await this.markKnown(from);
     }
+  }
+
+  /**
+   * A frame another device of this account sent, replayed to us over the
+   * mirror. It is our own message: attributed to our identity, and not
+   * counted as unread.
+   *
+   * Only content and membership are taken. A receipt, profile or contact
+   * frame is about the sibling's side of the exchange — applying it here
+   * would attribute the contact's read state, or their profile, to the wrong
+   * person.
+   */
+  private async onMirrored(m: { to: string; topic: string; payload: Uint8Array }): Promise<void> {
+    if (this.closed) return;
+    if (!m.topic.startsWith(CHAT_TOPIC_PREFIX)) return;
+    let frame: ChatFrame;
+    try {
+      frame = parseChatFrame(m.payload);
+    } catch {
+      return;
+    }
+    if (frame.type === ChatFrameType.MEMBERSHIP) {
+      // The membership frame the sibling sent to a member carries the state
+      // and the epoch secret, which is exactly what this device needs to be
+      // in the group at all.
+      await this.onMembershipFrame(this.client.identity, frame);
+      return;
+    }
+    if (
+      frame.type === ChatFrameType.RECEIPT ||
+      frame.type === ChatFrameType.PROFILE ||
+      frame.type === ChatFrameType.CONTACT ||
+      frame.type === ChatFrameType.PAYMENT
+    ) {
+      return;
+    }
+    const group = await this.groupState(frame.convId);
+    if (!group && toHex(frame.convId) !== toHex(this.conversationWith(m.to))) return;
+    await this.ingest(
+      { id: chatMessageId(frame), sender: decodeIdentity(this.client.identity), frame, receivedAt: this.now() },
+      /*local=*/ true,
+    );
   }
 
   private async ingest(m: StoredMessage, local: boolean): Promise<void> {

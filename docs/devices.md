@@ -129,6 +129,27 @@ What syncs, and how:
 | history backfill | direct channel (`stream.md`) |
 | drafts | not synced |
 
+**One-shot reply keys are suspended.** A v1 sender takes the one-shot reply
+key the recipient published and addresses its next message to it. That key
+lives in ONE device's memory, so publishing it from a multi-device account
+tells the contact to send somewhere the account's other devices cannot read —
+and they miss the reply silently, because nothing distinguishes "not for us"
+from "not decryptable". An account with more than one device on its list
+therefore stops minting reply keys, in messages and in acks, and the
+conversation stays on the account prekey that every device derives. The cost is
+that session's forward secrecy; the double ratchet removes the trade by
+deriving receiving keys from the account secret so every device advances the
+same chain (`ratchet.md`).
+
+**The mirror feeds the chat layer, not just the transport.** A mirrored frame
+is ingested as our own message, attributed to our identity and not counted as
+unread. Membership frames come with it, which is how a second device learns
+about a group at all: the frame carrying a group's state and epoch secret goes
+to the group's members, and our own devices are not among them. Receipts,
+profiles and contact frames are deliberately NOT ingested from the mirror —
+they describe the other side of the exchange, and applying them here would
+attribute a contact's read state or profile to the wrong person.
+
 **The sent-message mirror.** Outgoing messages are encrypted to the recipient,
 so your other devices cannot read them. A mirror copy addressed to your own
 account is needed — at the cost of a second envelope and a second proof of

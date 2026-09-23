@@ -821,6 +821,27 @@ export class MessagingClient extends Emitter<MessagingEvents> {
   }
 
   /**
+   * Whether this account has more than one device.
+   *
+   * A one-shot reply key lives in ONE device's memory, so publishing it tells
+   * a contact to address their next message somewhere our other devices
+   * cannot read. With siblings we therefore keep the conversation on the
+   * account prekey, which every device of the account derives. That trades a
+   * session key's forward secrecy for the phone seeing the same conversation
+   * as the desktop, and the trade goes away when the double ratchet lands:
+   * its receiving keys are derived from the account secret precisely so every
+   * device can advance the same chain (`docs/ratchet.md`).
+   */
+  private hasSiblingDevices(): boolean {
+    if (this.keyring.deviceList.length === 0) return false;
+    try {
+      return parseDeviceList(this.keyring.deviceList).devices.length > 1;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Mint a fresh reply key for a contact. The previous few stay registered:
    * a message or ack encrypted to an older key may still be in flight (an ack
    * flush and a transmit to the same contact can interleave), and revoking it
@@ -859,7 +880,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const recipientKey = await this.recipientKey(entry.recipient);
     // Captured before markSent, which increments it.
     const firstAttempt = entry.attempts === 0;
-    const replyPub = o.sign ? this.mintReplyKey(entry.recipient) : undefined;
+    const replyPub = o.sign && !this.hasSiblingDevices() ? this.mintReplyKey(entry.recipient) : undefined;
     const pending = this.outbox.pendingChunks(entry);
     for (const idx of pending) {
       const base: Omit<AuthFrame, 'sender' | 'sig'> = {
@@ -1539,12 +1560,19 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const p = this.pendingAcks.get(key);
     if (!p) return;
     this.pendingAcks.delete(key);
-    // Carry our own reply key so the sender's next message to us rides a fresh session key.
-    const replyPub = this.mintReplyKey(p.identity);
+    // Carry our own reply key so the sender's next message to us rides a fresh
+    // session key — unless this account has other devices, which could not
+    // read a message addressed to a key only this one holds.
+    const replyPub = this.hasSiblingDevices() ? undefined : this.mintReplyKey(p.identity);
     // Acks are signed like any other frame, so a secondary device acks with
     // its own key rather than being unable to ack at all.
     const inner = this.signInnerFrame(
-      { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), replyPub, payload: serializeAcks(p.entries) },
+      {
+        msgId: randomBytes(MSG_ID_BYTES),
+        timestamp: this.nowSeconds(),
+        ...(replyPub ? { replyPub } : {}),
+        payload: serializeAcks(p.entries),
+      },
       TOPIC_ACK,
       p.identity,
     );

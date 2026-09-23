@@ -19,6 +19,7 @@ import { MemoryStore } from './stores/memory-store.js';
 import { type Store } from './stores/store.js';
 import { fromUtf8, randomBytes, toHex, utf8 } from './common/bytes.js';
 import { ServiceFlags } from './net/messages.js';
+import { loopbackPair } from './stream/transport.js';
 import { GroupRole, memberOf } from './chat/group/state.js';
 import { decodeIdentity } from './usermsg/bundle.js';
 
@@ -313,6 +314,49 @@ describe.skipIf(!haveBinary)('end to end: devices across a relay', () => {
     await primary.chat.sendGroupText(ours, 'after the phone left');
     await atFriend;
     expect(await notSeen).toBe(true);
+  }, 600000);
+
+  it('backfills a newly paired device with history it can verify', async () => {
+    const primary = await account(66, nodes[0]!);
+    const peer = await account(67, nodes[1]!);
+    await introduce(primary, peer);
+
+    // A conversation that happens BEFORE the second device exists. This is
+    // the whole problem: the phone can decrypt everything from now on, and
+    // nothing from before.
+    const heard = waitFor<ChatEvents, 'message'>(primary.chat, 'message', (e) => e.message.text === 'from the peer');
+    await peer.chat.sendText(primary.chat.identity, 'from the peer');
+    await heard;
+    await primary.chat.sendText(peer.chat.identity, 'and the reply');
+
+    const secondary = await pairDevice(primary, nodes[1]!);
+    const convId = primary.chat.conversationWith(peer.chat.identity);
+    expect((await secondary.chat.history(convId)).messages).toHaveLength(0);
+
+    // Backfill rides a direct channel, not the bus: history is megabytes and
+    // the bus charges a proof of work per envelope. A loopback pair stands in
+    // for the channel the stream layer will open.
+    const [side, other] = loopbackPair();
+    const server = primary.chat.serveBackfill(side.channel('control'));
+    try {
+      const res = await secondary.chat.backfillFrom(other.channel('control'), convId, { timeoutMs: 30000 });
+      expect(res.added).toBe(2);
+      // What the peer said came with the signed frame it arrived in, so the
+      // phone checked it rather than trusting the desktop. What the desktop
+      // itself sent has no such proof — it was never signed to us.
+      expect(res.verified).toBe(1);
+      expect(res.unverified).toBe(1);
+      expect(res.rejected).toBe(0);
+    } finally {
+      server.close();
+      side.close();
+      other.close();
+    }
+
+    const onPhone = await secondary.chat.history(convId);
+    expect(onPhone.messages.map((m) => m.text)).toEqual(['from the peer', 'and the reply']);
+    // Catching up is not the same as being spoken to: none of it is unread.
+    expect(await secondary.chat.unreadCount(convId)).toBe(0);
   }, 600000);
 
   it('carries a payment request and its receipt between nodes', async () => {

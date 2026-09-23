@@ -33,7 +33,9 @@ import {
 } from './frame.js';
 
 const NS = 'chat';
-const RECORD_VERSION = 1;
+const RECORD_VERSION = 2;
+/** Records written before the signed frame was kept. Still readable. */
+const RECORD_VERSION_UNSIGNED = 1;
 
 /** u64 as 16 lowercase hex digits, so string order is numeric order. */
 function lamportKey(v: bigint): string {
@@ -47,24 +49,48 @@ export interface StoredMessage {
   frame: ChatFrame;
   /** Local clock, unix ms, when we first stored it. */
   receivedAt: number;
+  /**
+   * The signed transport frame this message arrived in, and the recipient key
+   * its signature is bound to. Kept so history handed to another device can be
+   * verified there rather than taken on trust (`../stream/backfill.js`).
+   *
+   * Absent for our own messages, for unsigned ones, for chunked ones, and for
+   * anything stored before this was recorded.
+   */
+  signed?: Uint8Array;
+  signedFor?: Uint8Array;
 }
 
 function encodeRecord(m: StoredMessage): Uint8Array {
   const w = new Writer().u8(RECORD_VERSION);
   if (m.sender) w.u8(1).bytes(m.sender);
   else w.u8(0);
-  return w.i64(BigInt(m.receivedAt)).varBytes(serializeChatFrame(m.frame)).finish();
+  w.i64(BigInt(m.receivedAt)).varBytes(serializeChatFrame(m.frame));
+  if (m.signed && m.signedFor) w.u8(1).varBytes(m.signed).bytes(m.signedFor);
+  else w.u8(0);
+  return w.finish();
 }
 
 function decodeRecord(bytes: Uint8Array): StoredMessage {
   const r = new Reader(bytes);
-  if (r.u8() !== RECORD_VERSION) throw new Error('unknown chat record version');
+  const version = r.u8();
+  if (version !== RECORD_VERSION && version !== RECORD_VERSION_UNSIGNED) {
+    throw new Error('unknown chat record version');
+  }
   const sender = r.u8() === 1 ? r.bytes(48).slice() : undefined;
   const receivedAt = Number(r.i64());
   const frame = parseChatFrame(r.varBytes());
+  // Version 1 records stop here. They are perfectly good history; they simply
+  // cannot prove their own authorship to another device.
+  const signed = version === RECORD_VERSION && r.u8() === 1 ? r.varBytes().slice() : undefined;
+  const signedFor = signed ? r.bytes(48).slice() : undefined;
   r.assertDone();
   const out: StoredMessage = { id: chatMessageId(frame), frame, receivedAt };
   if (sender) out.sender = sender;
+  if (signed && signedFor) {
+    out.signed = signed;
+    out.signedFor = signedFor;
+  }
   return out;
 }
 

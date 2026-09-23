@@ -43,6 +43,8 @@ import {
 } from './frame.js';
 import { ChatStore, type MessageView, type StoredMessage } from './store.js';
 import { decryptFile, encryptFile, type FileClient, type FileServer } from '../stream/file.js';
+import { BackfillClient, BackfillServer, type SyncEntry } from '../stream/backfill.js';
+import type { StreamChannel } from '../stream/transport.js';
 
 /**
  * Largest attachment that fits the bus without a direct channel.
@@ -328,7 +330,10 @@ export class ChatClient extends Emitter<ChatEvents> {
       // Group traffic: the sender must be a member, and must have joined no
       // later than the epoch this message belongs to.
       if (!memberOf(group, sender)) return;
-      await this.ingest({ id: chatMessageId(frame), sender, frame, receivedAt: this.now() }, /*local=*/ false);
+      await this.ingest(
+        { id: chatMessageId(frame), sender, frame, receivedAt: this.now(), ...proof(m) },
+        /*local=*/ false,
+      );
       return;
     }
 
@@ -389,7 +394,10 @@ export class ChatClient extends Emitter<ChatEvents> {
       return;
     }
 
-    await this.ingest({ id: chatMessageId(frame), sender, frame, receivedAt: this.now() }, /*local=*/ false);
+    await this.ingest(
+      { id: chatMessageId(frame), sender, frame, receivedAt: this.now(), ...proof(m) },
+      /*local=*/ false,
+    );
   }
 
   private async onContactFrame(from: string, frame: ChatFrame): Promise<void> {
@@ -481,6 +489,94 @@ export class ChatClient extends Emitter<ChatEvents> {
   /** A conversation in display order, with gaps reported alongside. */
   history(convId: Uint8Array): Promise<{ messages: MessageView[]; gaps: Gap[] }> {
     return this.chat.view(convId);
+  }
+
+  /**
+   * Serve history to another device of this account over a direct channel.
+   *
+   * The caller owns the channel and decides who is on the other end: this is
+   * for our own devices, and there is nothing in the protocol that makes it
+   * safe to point at a contact. Close the returned server when the channel
+   * goes away.
+   */
+  serveBackfill(channel: StreamChannel, opts: { maxLimit?: number } = {}): BackfillServer {
+    return new BackfillServer(
+      channel,
+      {
+        history: async (convId, fromLamport, limit) => {
+          const stored = await this.chat.messages(convId);
+          return stored
+            .filter((m) => m.frame.lamport >= fromLamport)
+            .slice(0, limit)
+            .map((m) => {
+              const e: SyncEntry = { frame: serializeChatFrame(m.frame), receivedAt: m.receivedAt };
+              if (m.sender) e.sender = m.sender;
+              if (m.signed && m.signedFor) {
+                e.signed = m.signed;
+                e.signedFor = m.signedFor;
+              }
+              return e;
+            });
+        },
+      },
+      opts,
+    );
+  }
+
+  /**
+   * Ask another device of this account for a conversation's history and fold
+   * it into ours.
+   *
+   * Entries that came with a signature are verified here, not taken on trust,
+   * and a bad one is dropped rather than stored. Entries with no signature —
+   * our own sent messages, and anything stored before signatures were kept —
+   * are accepted, and the count is returned so an application can say what it
+   * took on trust.
+   */
+  async backfillFrom(
+    channel: StreamChannel,
+    convId: Uint8Array,
+    opts: { fromLamport?: bigint; limit?: number; timeoutMs?: number } = {},
+  ): Promise<{ added: number; verified: number; unverified: number; rejected: number }> {
+    const client = new BackfillClient(channel, (id) => chatTopic(id));
+    try {
+      const res = await client.fetch(convId, opts);
+      let added = 0;
+      for (const e of [...res.verified, ...res.unverified]) {
+        let frame: ChatFrame;
+        try {
+          frame = parseChatFrame(e.frame);
+        } catch {
+          continue;
+        }
+        // A frame claiming to belong to another conversation is not history
+        // for this one, whatever it is signed with.
+        if (toHex(frame.convId) !== toHex(convId)) continue;
+        const before = await this.chat.messages(convId);
+        const had = before.some((m) => toHex(m.id) === toHex(chatMessageId(frame)));
+        await this.ingest(
+          {
+            id: chatMessageId(frame),
+            ...(e.sender ? { sender: e.sender } : {}),
+            frame,
+            receivedAt: e.receivedAt,
+            ...(e.signed && e.signedFor ? { signed: e.signed, signedFor: e.signedFor } : {}),
+          },
+          // Backfill is history, not new traffic: it must not mark anything
+          // unread on a device that is only catching up.
+          /*local=*/ true,
+        );
+        if (!had) added++;
+      }
+      return {
+        added,
+        verified: res.verified.length,
+        unverified: res.unverified.length,
+        rejected: res.rejected,
+      };
+    } finally {
+      client.close();
+    }
   }
 
   conversations(): Promise<Uint8Array[]> {
@@ -1055,4 +1151,14 @@ function parseMembershipBody(bytes: Uint8Array): { state: GroupState; epochSecre
   const epochSecret = r.bytes(32).slice();
   r.assertDone();
   return { state, epochSecret };
+}
+
+/**
+ * The proof of authorship an inbound message carries, if any, in the shape
+ * `StoredMessage` keeps it. A message that was unsigned or chunked has none,
+ * and history without it is still history — it just cannot prove itself to
+ * another device.
+ */
+function proof(m: IncomingMessage): { signed?: Uint8Array; signedFor?: Uint8Array } {
+  return m.signed && m.signedFor ? { signed: m.signed, signedFor: m.signedFor } : {};
 }

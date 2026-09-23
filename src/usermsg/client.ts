@@ -121,6 +121,23 @@ export interface IncomingMessage {
   payload: Uint8Array;
   scope: MessageScope;
   timestamp: number; // unix seconds as claimed by the sender
+  /**
+   * The signed `AuthFrame` exactly as it arrived, for a message that was
+   * signed and fitted one frame. Kept so a layer above can hand the proof of
+   * authorship on to somebody else — history backfill to a newly paired
+   * device is the case that needs it, since a frame relayed by another device
+   * is otherwise only as trustworthy as that device.
+   *
+   * Absent for unsigned messages and for chunked ones: a chunk's signature
+   * covers that chunk, not the payload the reassembler produced.
+   */
+  signed?: Uint8Array;
+  /**
+   * The recipient key `signed` is bound to. A signature covers (topic,
+   * recipient, frame), so verifying it anywhere else needs this — and a forger
+   * cannot pick a convenient value, because the signature covers it too.
+   */
+  signedFor?: Uint8Array;
 }
 
 export interface SendOptions {
@@ -1410,6 +1427,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       payload,
       scope,
       timestamp: Number(frame.timestamp),
+      ...(frame.sender && frame.sig && !frame.chunk ?
+        { signed: outer.body, signedFor: recipientForSig }
+      : {}),
     };
     if (scope === 'broadcast') {
       const subs = this.subscriptions.get(topic);

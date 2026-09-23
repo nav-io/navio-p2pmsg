@@ -258,8 +258,12 @@ Still open in M5:
   behaviour is to throw, and an untested implementation behind a confident API
   is worse than an absent one. The interface and the signal codec are the seam
   it plugs into.
-- History backfill for a newly paired device (the protocol is described in
-  docs/stream.md; the transfer machinery it needs now exists).
+- ✅ **History backfill** (`src/stream/backfill.ts`). A newly paired device
+  asks another device of the account for a conversation over a direct channel
+  and verifies every frame that carries a signature, rather than trusting the
+  device that sent it. Our own sent messages and anything stored before the
+  signed frame was kept have no proof to check; the result says how many were
+  taken on trust, and an entry whose proof is present and wrong is dropped.
 - Calls.
 
 ### M6 — product surface (done except calls)

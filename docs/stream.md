@@ -132,6 +132,23 @@ everything.
 This is why backfill is not on the bus: it is megabytes and would cost one
 proof of work per 3 KB.
 
+**What a signature covers, and what carries it.** A chat frame is not signed;
+the transport frame it arrived in is, over (topic, recipient key, frame). So an
+entry carries that signed `AuthFrame` and the recipient key it binds to, and
+the receiver checks three things: the signature holds, the recipient key is the
+one the signature covers (a forger cannot substitute a convenient one, since it
+is signed too), and the frame in the entry is byte-for-byte the one the
+signature was over. Checking only the signature would let a device staple a
+genuine one to different content.
+
+Two kinds of entry have no proof and never can: **our own sent messages**,
+which were signed to the recipient and not to us, and anything stored before
+the signed frame was kept. They are still history, and a device that hands us
+history already holds the account's secrets — it is simply not trusted to
+invent what a contact said. `backfillFrom()` returns `verified`, `unverified`
+and `rejected` counts so an application can say which is which. A rejected
+entry is dropped, never stored.
+
 ## Typing and presence
 
 `EPHEMERAL` frames on the control channel only (decision 34). They never touch
@@ -194,6 +211,6 @@ src/stream/
 - [ ] signalling over chat frames, including an offer retrieved from the archive
 - [ ] resumable file transfer with per-file keys and hash verification
 - [ ] bus-chunked fallback with an explicit size cap and a clear error past it
-- [ ] backfill verifying signatures on the receiving device
+- [x] backfill verifying signatures on the receiving device
 - [ ] IP-exposure policy: opt-in per contact, off for requests, globally disableable
 - [ ] browser ⇄ Node interop test for every channel type

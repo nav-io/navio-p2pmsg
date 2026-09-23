@@ -89,6 +89,15 @@ async function mk(hub: Hub, seedByte: number, extra: Partial<Parameters<typeof M
   return c;
 }
 
+/** Poll until `pred` holds. For state no event announces. */
+async function waitUntilTrue(pred: () => boolean, ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error('timeout waiting for condition');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 function waitFor<K extends keyof MessagingEvents>(
   client: MessagingClient,
   event: K,
@@ -579,6 +588,42 @@ describe('device revocation', () => {
     expect(isListedDevice(list, device.pub)).toBe(false);
     expect(list.accountEpoch).toBe(res.epoch);
     expect(verifyDeviceList(primary.keyring.identity.pub, list).ok).toBe(true);
+  }, 40000);
+
+  it('moves the key the bus listens on, not just the one it publishes', async () => {
+    // Rotating the keyring alone republishes a prekey nothing decrypts: every
+    // sender that then discovers the new bundle addresses a key the bus was
+    // never told about, and the account goes quietly deaf.
+    const hub = new Hub();
+    const { primary, device } = await accountWithTwoDevices(hub, 72);
+    const peer = await mk(hub, 73);
+    await peer.addContact(primary.bundle());
+    await primary.revokeDevice(device.pub);
+    await peer.discover(primary.identity);
+
+    const got = waitFor(primary, 'message', (m) => fromUtf8(m.payload) === 'to the new key');
+    await peer.send(primary.identity, utf8('to the new key'));
+    expect(fromUtf8((await got).payload)).toBe('to the new key');
+  }, 40000);
+
+  it('tells contacts their cached key moved when asked to', async () => {
+    const hub = new Hub();
+    const { primary, device } = await accountWithTwoDevices(hub, 74);
+    const peer = await mk(hub, 75);
+    await peer.addContact(primary.bundle());
+    const cached = toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey);
+
+    // Nothing local can stop a revoked device reading what a contact still
+    // addresses to the old key — it holds its own copy of the secret. The
+    // senders are the only lever.
+    await primary.revokeDevice(device.pub, { notifyContacts: true });
+    await waitUntilTrue(
+      () => toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey) !== cached,
+      10000,
+    );
+    expect(toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey)).toBe(
+      toHex(primary.keyring.prekey.pub),
+    );
   }, 40000);
 
   it('hands the new epoch to the devices that remain', async () => {

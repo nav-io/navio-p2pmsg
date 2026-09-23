@@ -106,11 +106,26 @@ Pairing offers expire after 5 minutes and are single-use.
    the new device list, plus a signed revocation record naming the removed
    `device_id` and the epoch from which it is invalid.
 4. Group epochs the revoked device belonged to are rotated too (`groups.md`).
-5. Previous-epoch keys stay in a 7-day grace window so senders holding a cached
+5. The key the bus LISTENS on moves too, not only the one the bundle
+   publishes. Rotating the keyring alone republishes a prekey nothing
+   decrypts: every sender who then discovers the new bundle addresses a key
+   the bus was never told about, and the account goes quietly deaf.
+6. Previous-epoch keys stay in a 7-day grace window so senders holding a cached
    bundle keep working — **the revoked device can also still read that grace
-   window**. Applications should say so when the user revokes, and offer a
-   "cut off immediately" option that skips the grace at the cost of dropping
-   messages from stale senders.
+   window**.
+
+   There is no local cure for that. The revoked device holds its own copy of
+   the previous inbox secret; dropping ours changes nothing for it and only
+   stops US reading the window. The senders are the only lever, so
+   `revokeDevice(pub, { notifyContacts: true })` pushes the new bundle to
+   every contact we hold keys for instead of waiting to be asked. It costs one
+   envelope per contact, which is why it is the caller's call, and it is best
+   effort: a contact that is offline learns the new bundle the usual way, when
+   an unacked send makes it discover again.
+
+   An unsolicited bundle arrives on `_p2pmsg/bundle` and is accepted only from
+   the identity it names, so nobody can push somebody else's stale bundle to
+   roll a contact's keys backwards.
 
 Revocation is forward-only. It cannot unread what the device already read.
 

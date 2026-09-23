@@ -80,6 +80,7 @@ export class BusKeys {
     this.setInbox(newSk, newPub);
   }
 
+
   /** Register a per-request session key. `ttlMs` <= 0 / undefined = no expiry. Replaces an existing entry for `pub`. */
   addSessionKey(sk: Uint8Array, pub?: Uint8Array, ttlMs?: number): void {
     const secret = secretFromBytes(sk);

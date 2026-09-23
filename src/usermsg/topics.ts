@@ -19,6 +19,17 @@ export const TOPIC_DEVICE = '_p2pmsg/device';
  * never sends one.
  */
 export const TOPIC_MIRROR = '_p2pmsg/mirror';
+/**
+ * An unsolicited bundle: "my keys moved, here they are".
+ *
+ * Revoking a device rotates the account epoch, but a contact keeps addressing
+ * the key it cached until it discovers the new one — and every one of those
+ * messages is readable by the device that was just revoked, which holds the
+ * old secret and cannot be made to forget it. Nothing local fixes that; the
+ * only lever is the senders. So on revocation we can push the new bundle to
+ * every contact instead of waiting for them to ask.
+ */
+export const TOPIC_BUNDLE = '_p2pmsg/bundle';
 /** Default topic for 1:1 application messages when the app gives none. */
 export const TOPIC_DEFAULT = 'msg';
 

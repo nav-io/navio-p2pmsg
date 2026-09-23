@@ -236,8 +236,12 @@ describe.skipIf(!haveBinary)('end to end: devices across a relay', () => {
     await stillReadable;
 
     // Once the sender learns the new bundle, every later message goes to keys
-    // the revoked device does not have.
+    // the revoked device does not have. Pin that the sender really did move:
+    // otherwise this test could pass by sending to the old key forever.
     await peer.client.discover(primary.client.identity);
+    const cached = peer.client.contacts.get(decodeIdentity(primary.client.identity))!.bundle!.prekey;
+    expect(toHex(cached)).toBe(toHex(primary.client.keyring.prekey.pub));
+    expect(toHex(cached)).not.toBe(beforePrekey);
     const atPrimaryAgain = waitFor<MessagingEvents, 'message'>(
       primary.client,
       'message',
@@ -314,6 +318,53 @@ describe.skipIf(!haveBinary)('end to end: devices across a relay', () => {
     await primary.chat.sendGroupText(ours, 'after the phone left');
     await atFriend;
     expect(await notSeen).toBe(true);
+  }, 600000);
+
+  it('closes the window on a revoked device by telling contacts their key moved', async () => {
+    const primary = await account(68, nodes[0]!);
+    const peer = await account(69, nodes[0]!);
+    await introduce(primary, peer);
+    const secondary = await pairDevice(primary, nodes[1]!);
+
+    const both = waitFor<MessagingEvents, 'message'>(
+      secondary.client,
+      'message',
+      (m) => fromUtf8(m.payload) === 'before the revoke',
+    );
+    await peer.client.send(primary.client.identity, utf8('before the revoke'));
+    await both;
+
+    // A revoked device keeps its copy of the old inbox secret, so nothing we
+    // do locally stops it reading what a contact still addresses there. The
+    // senders are the only lever, and `notifyContacts` pulls it: the new
+    // bundle is pushed rather than waited for.
+    const cachedBefore = toHex(peer.client.contacts.get(decodeIdentity(primary.client.identity))!.bundle!.prekey);
+    await primary.client.revokeDevice(secondary.devicePub, { notifyContacts: true });
+    await waitUntil(
+      async () =>
+        toHex(peer.client.contacts.get(decodeIdentity(primary.client.identity))!.bundle!.prekey) !== cachedBefore,
+      60000,
+    );
+    expect(toHex(peer.client.contacts.get(decodeIdentity(primary.client.identity))!.bundle!.prekey)).toBe(
+      toHex(primary.client.keyring.prekey.pub),
+    );
+
+    // From here the contact addresses the new key, which the primary reads and
+    // the revoked device cannot.
+    const atPrimary = waitFor<MessagingEvents, 'message'>(
+      primary.client,
+      'message',
+      (m) => fromUtf8(m.payload) === 'after the revoke',
+    );
+    const notAtSecondary = nothingWithin<MessagingEvents, 'message'>(
+      secondary.client,
+      'message',
+      (m) => fromUtf8(m.payload) === 'after the revoke',
+      15000,
+    );
+    await peer.client.send(primary.client.identity, utf8('after the revoke'));
+    await atPrimary;
+    expect(await notAtSecondary).toBe(true);
   }, 600000);
 
   it('backfills a newly paired device with history it can verify', async () => {

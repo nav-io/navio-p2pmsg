@@ -231,9 +231,13 @@ Still open in M4:
   path; there is no catch-up for a device that was offline while those
   changed. Group epoch secrets now arrive over the mirror, but only while the
   device is online to hear it.
-- The grace window. The previous prekey stays decryptable so in-flight messages
-  are not lost, which means a revoked device can still read that window;
-  applications should say so, and an immediate cut-off is not yet offered.
+- ✅ **Closing the window after a revoke.** Two parts. The bus inbox key now
+  moves with the keyring, which it did not: revocation republished a prekey
+  the bus had never been told about, so the account went deaf to every sender
+  that discovered the new bundle. And `revokeDevice(pub, { notifyContacts:
+  true })` pushes the new bundle to every contact rather than waiting to be
+  asked — the only lever there is, since the revoked device keeps its own copy
+  of the previous inbox secret and nothing local takes that away.
 
 ### M5 — stream layer (core done, WebRTC backend pending)
 

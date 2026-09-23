@@ -60,6 +60,7 @@ import {
   isExtendedBundle,
   parseAnyBundle,
   serializeExtendedBundle,
+  parseExtendedBundle,
   BUNDLE_BYTES,
 } from './bundle.js';
 import { extractDetectionKey, fmdFlag, isValidClueKey, parseClueKey } from '../bus/fmd.js';
@@ -101,6 +102,7 @@ import {
   TOPIC_DEFAULT,
   TOPIC_DEVICE,
   TOPIC_MIRROR,
+  TOPIC_BUNDLE,
   TOPIC_PAIR,
   TOPIC_PREKEY_RESPONSE,
   isReservedTopic,
@@ -974,12 +976,18 @@ export class MessagingClient extends Emitter<MessagingEvents> {
    * device can no longer read anything new, republishes the device list
    * without it, and hands the new secret to each device that remains.
    *
-   * Two things worth telling the user rather than hiding: the previous prekey
+   * Two things worth telling the user rather than hiding. The previous prekey
    * stays in the grace ring so messages already in flight are not lost, which
-   * means the revoked device can still read THAT window; and revocation is
-   * forward-only — it cannot unread what the device already read.
+   * means the revoked device can still read THAT window — pass
+   * `{ immediate: true }` to give the window up and cut the device off now,
+   * at the cost of dropping messages from senders still holding the old
+   * bundle until their retry finds the new one. And revocation is
+   * forward-only either way: it cannot unread what the device already read.
    */
-  async revokeDevice(devicePub: Uint8Array): Promise<{ epoch: number; deviceList: Uint8Array }> {
+  async revokeDevice(
+    devicePub: Uint8Array,
+    opts: { notifyContacts?: boolean } = {},
+  ): Promise<{ epoch: number; deviceList: Uint8Array }> {
     if (!this.keyring.isPrimary) throw new Error('only the primary device can revoke devices');
     if (this.keyring.deviceList.length === 0) throw new Error('this account has no device list');
     const current = parseDeviceList(this.keyring.deviceList);
@@ -990,6 +998,12 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     // Rotate FIRST: the new list is only meaningful alongside the epoch it
     // belongs to, and peers refuse a list whose epoch went backwards.
     await this.keyring.rotateAccountEpoch();
+    // And move the key we actually listen on. Rotating the keyring alone
+    // republishes a prekey nothing decrypts: every sender who then discovers
+    // the new bundle addresses a key the bus has never been told about, and
+    // the account goes quietly deaf.
+    this.keys.rotateInbox(this.keyring.prekey.sk, this.keyring.prekey.pub);
+
     const identity = this.keyring.requireIdentitySecret();
     const list = signDeviceList(
       { version: DEVICE_LIST_VERSION, accountEpoch: this.keyring.epoch, devices: remaining },
@@ -1004,8 +1018,63 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       if (toHex(d.devicePub) === toHex(identity.pub)) continue;
       await this.sendAccountEpoch(d.devicePub, d.cert, d.caps, deviceList);
     }
+    // Tell our contacts their cached key is stale. Until they know, every
+    // message they send goes to a key the revoked device still holds — and
+    // dropping our own grace window would not change that, because the
+    // revoked device reads with its own copy, not with ours. The senders are
+    // the only lever there is. It costs one envelope per contact, so it is
+    // the caller's call.
+    if (opts.notifyContacts) await this.announceBundle();
     this.emit('accountEpoch', { epoch: this.keyring.epoch, deviceList });
     return { epoch: this.keyring.epoch, deviceList };
+  }
+
+  /**
+   * Push our current bundle to every contact we hold keys for, so they stop
+   * addressing a key that has moved.
+   *
+   * Best effort and unacked: a contact that is offline learns the new bundle
+   * the usual way, by discovering it when a send fails to be acked.
+   */
+  async announceBundle(): Promise<number> {
+    if (!this.keyring.isPrimary) return 0;
+    const bundleBytes = serializeExtendedBundle(this.keyring.extendedBundle());
+    let sent = 0;
+    for (const contact of this.contacts.all()) {
+      const dest = contact.bundle?.prekey;
+      if (!dest) continue;
+      try {
+        const inner = signAuthFrame(
+          { msgId: randomBytes(MSG_ID_BYTES), timestamp: this.nowSeconds(), payload: bundleBytes },
+          this.keyring.requireIdentitySecret(),
+          TOPIC_BUNDLE,
+          contact.identity,
+        );
+        await this.bus.send(USER_DATA_KIND, dest, serializeUserMsgFrame({ topic: TOPIC_BUNDLE, body: inner }), {
+          stem: true,
+        });
+        sent++;
+      } catch (e) {
+        this.emit('error', e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+    return sent;
+  }
+
+  /** An unsolicited bundle from a contact whose keys moved. */
+  private async onBundleAnnounce(frame: AuthFrame): Promise<void> {
+    if (!frame.sender) return;
+    try {
+      const bundle = parseExtendedBundle(frame.payload);
+      // The bundle names its own identity and is self-authenticating, but the
+      // frame must come from that identity too: otherwise anyone could push
+      // anyone's (stale, genuine) bundle and roll a contact's keys backwards.
+      if (!equal(bundle.identity, frame.sender)) return;
+      await this.learnBundle(bundle);
+    } catch {
+      // Malformed, or a signature that does not check out: ignore it. The
+      // contact's cached bundle is left exactly as it was.
+    }
   }
 
   /** Send the current account epoch to one of our own devices. */
@@ -1395,6 +1464,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (topic === TOPIC_PAIR) return this.onPairingGrant(frame);
     if (topic === TOPIC_DEVICE) return this.onAccountEpoch(frame);
     if (topic === TOPIC_MIRROR) return this.onMirror(frame);
+    if (topic === TOPIC_BUNDLE) return this.onBundleAnnounce(frame);
     if (isReservedTopic(topic)) return;
 
     if (frame.sender) {

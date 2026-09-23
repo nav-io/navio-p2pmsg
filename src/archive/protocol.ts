@@ -1,7 +1,9 @@
 /**
  * Wire format of the archive query, matching navio-core `src/p2pmsg/archive.h`.
  *
+ *   p2pmsgchal  u8[32] challenge          (unsolicited, after verack)
  *   getp2pmsgs  u8 version | ArchiveStamp | u64 cursor | u16 limit | u8 precision
+ *               | u32 scan_budget | u8[32] challenge
  *               | CompactSize n, u8[n] detection_key | i64 not_before
  *   p2pmsgs     u8 version | u64 next_cursor | u8 complete
  *               | CompactSize n, n x { u64 id, i64 received_at, CompactSize, envelope }
@@ -20,6 +22,12 @@ export const ARCHIVE_STAMP_VERSION = 1;
 /** Caps the serving node enforces regardless of the stamp paid. */
 export const MAX_ARCHIVE_LIMIT = 500;
 export const MAX_ARCHIVE_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const MAX_ARCHIVE_SCAN_ENTRIES = 50_000;
+/**
+ * Entries a query may walk when it names no budget. Small enough to stay free,
+ * large enough to be useful — silence must not buy the maximum scan.
+ */
+export const DEFAULT_ARCHIVE_SCAN_BUDGET = 1000;
 
 /**
  * Proof of work on a query.
@@ -53,15 +61,20 @@ export function archiveStampHash(s: ArchiveStamp): Uint8Array {
 
 /**
  * Difficulty for a query: `base` plus a term that doubles with the work
- * requested, capped at base+8. A scan costs (entries scanned) x (precision + 2)
+ * requested, capped at base+8. A scan costs (entries WALKED) x (precision + 2)
  * group multiplications, so the requester pays for both numbers it picks.
+ *
+ * Priced on `scanBudget`, not on `limit`: `limit` bounds MATCHES, and the two
+ * diverge completely for a high-precision key — a 24-bit key almost never
+ * matches, so pricing on limit made the cheapest query on the wire the most
+ * expensive one to serve.
  *
  * Must stay identical to `ArchiveStampBits` in navio-core or every query is
  * rejected as underpowered.
  */
-export function archiveStampBits(baseBits: number, limit: number, precision: number): number {
-  let units = Math.max(limit, 1) * Math.max(precision, 1);
-  const freeAllowance = 100 * 4;
+export function archiveStampBits(baseBits: number, scanBudget: number, precision: number): number {
+  let units = Math.max(scanBudget, 1) * Math.max(precision, 1);
+  const freeAllowance = 1000 * 4;
   let extra = 0;
   while (units > freeAllowance && extra < 8) {
     units >>= 1;
@@ -87,6 +100,18 @@ export interface ArchiveRequest {
   limit: number;
   /** n, so `detectionKey` is n * 32 bytes. */
   precision: number;
+  /**
+   * Entries the server may WALK for this query. What the stamp is priced on
+   * and what the walk stops at; the server caps it at
+   * `MAX_ARCHIVE_SCAN_ENTRIES`.
+   */
+  scanBudget: number;
+  /**
+   * The challenge this server issued on THIS connection (`p2pmsgchal`).
+   * Committed to by the stamp, so a grind bought for one node on one
+   * connection is worthless anywhere else.
+   */
+  challenge: Uint8Array; // 32
   detectionKey: Uint8Array;
   /** 0 = no lower bound on `receivedAt`. */
   notBefore: bigint;
@@ -94,7 +119,16 @@ export interface ArchiveRequest {
 
 /** The query fields, i.e. everything the stamp commits to. */
 function writeQueryFields(w: Writer, q: Omit<ArchiveRequest, 'stamp'>): Writer {
-  return w.u8(q.version).u64(q.cursor).u16(q.limit).u8(q.precision).varBytes(q.detectionKey).i64(q.notBefore);
+  if (q.challenge.length !== 32) throw new Error('challenge must be 32 bytes');
+  return w
+    .u8(q.version)
+    .u64(q.cursor)
+    .u16(q.limit)
+    .u8(q.precision)
+    .u32(q.scanBudget)
+    .bytes(q.challenge)
+    .varBytes(q.detectionKey)
+    .i64(q.notBefore);
 }
 
 /**
@@ -106,9 +140,18 @@ export function archiveQueryHash(q: Omit<ArchiveRequest, 'stamp'>): Uint8Array {
 }
 
 export function serializeArchiveRequest(req: ArchiveRequest): Uint8Array {
+  if (req.challenge.length !== 32) throw new Error('challenge must be 32 bytes');
   const w = new Writer().u8(req.version);
   writeArchiveStamp(w, req.stamp);
-  return w.u64(req.cursor).u16(req.limit).u8(req.precision).varBytes(req.detectionKey).i64(req.notBefore).finish();
+  return w
+    .u64(req.cursor)
+    .u16(req.limit)
+    .u8(req.precision)
+    .u32(req.scanBudget)
+    .bytes(req.challenge)
+    .varBytes(req.detectionKey)
+    .i64(req.notBefore)
+    .finish();
 }
 
 export function parseArchiveRequest(bytes: Uint8Array): ArchiveRequest {
@@ -121,6 +164,8 @@ export function parseArchiveRequest(bytes: Uint8Array): ArchiveRequest {
     cursor: r.u64(),
     limit: r.u16(),
     precision: r.u8(),
+    scanBudget: r.u32(),
+    challenge: r.bytes(32).slice(),
     detectionKey: r.varBytes().slice(),
     notBefore: r.i64(),
   };
@@ -185,7 +230,7 @@ export function buildArchiveRequest(
     queryHash: archiveQueryHash(fields),
     nonce: 0n,
   };
-  const bits = archiveStampBits(opts.baseBits, q.limit, q.precision);
+  const bits = archiveStampBits(opts.baseBits, q.scanBudget, q.precision);
   if (!grindArchiveStamp(stamp, bits)) throw new Error('could not grind an archive query stamp');
   return { ...fields, stamp };
 }

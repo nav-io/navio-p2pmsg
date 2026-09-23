@@ -60,6 +60,10 @@ export const MessageType = {
   // wire — navio-core's own `getoutputdata` (13 chars) is the cautionary tale.
   GETP2PMSGS: 'getp2pmsgs',
   P2PMSGS: 'p2pmsgs',
+  // Named p2pmsgchal, not p2pmsgchallenge: 13 characters does not fit the
+  // command field, and navio-core asserts on the overlong name rather than
+  // ignoring it.
+  P2PMSGCHAL: 'p2pmsgchal',
 } as const;
 
 // ---------------------------------------------------------------------------

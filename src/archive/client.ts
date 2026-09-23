@@ -21,13 +21,17 @@ import type { Store } from '../stores/store.js';
 import { Reader, Writer } from '../common/serialize.js';
 import {
   type ArchiveResponse,
+  DEFAULT_ARCHIVE_SCAN_BUDGET,
   MAX_ARCHIVE_LIMIT,
+  MAX_ARCHIVE_SCAN_ENTRIES,
   buildArchiveRequest,
   parseArchiveResponse,
   serializeArchiveRequest,
 } from './protocol.js';
 
 const NS = 'archive';
+/** How long to wait for a `p2pmsgchal` that a just-connected peer owes us. */
+const CHALLENGE_WAIT_MS = 5000;
 
 export interface ArchiveClientOptions {
   pool: PeerPool;
@@ -42,6 +46,13 @@ export interface ArchiveClientOptions {
   precision?: number;
   /** Entries per query. The node caps this at 500. */
   limit?: number;
+  /**
+   * Entries the node may WALK per query, and what the stamp is priced on.
+   * `limit` bounds matches; this bounds work, and for a high-precision key
+   * almost nothing matches, so the two are not the same number. Default
+   * `DEFAULT_ARCHIVE_SCAN_BUDGET`, which the node serves for the base cost.
+   */
+  scanBudget?: number;
   /** Base difficulty the archive charges. Must match its `-p2pmsgarchivepowbits`. */
   powBits: number;
   /** How long to wait for a `p2pmsgs` response. Default 60 s. */
@@ -68,6 +79,7 @@ export class ArchiveClient {
     this.opts = {
       precision: o.precision ?? 8,
       limit: Math.min(o.limit ?? 100, MAX_ARCHIVE_LIMIT),
+      scanBudget: Math.min(o.scanBudget ?? DEFAULT_ARCHIVE_SCAN_BUDGET, MAX_ARCHIVE_SCAN_ENTRIES),
       powBits: o.powBits,
       timeoutMs: o.timeoutMs ?? 60_000,
       now: o.now ?? (() => Date.now()),
@@ -153,11 +165,21 @@ export class ArchiveClient {
     // responses to requests by peer id only works if there is one in flight.
     if (this.pending.has(peerId)) throw new Error(`archive query already in flight for ${peerId}`);
 
+    // The stamp has to commit to this peer's challenge, and we cannot grind
+    // one before it has sent it. It is unsolicited and arrives right after
+    // verack, so on a connection we have only just made it may be a tick
+    // behind us — wait briefly rather than treat a fresh peer as one with
+    // nothing to say.
+    const challenge = await this.awaitChallenge(peer);
+    if (!challenge) return undefined;
+
     const req = buildArchiveRequest(
       {
         cursor,
         limit: this.opts.limit,
         precision: this.opts.precision,
+        scanBudget: this.opts.scanBudget,
+        challenge,
         detectionKey,
         notBefore: 0n,
       },
@@ -181,6 +203,16 @@ export class ArchiveClient {
         resolve(undefined);
       }
     });
+  }
+
+  /** The peer's archive challenge, waiting a moment for one that is in flight. */
+  private async awaitChallenge(peer: { archiveChallenge: Uint8Array | undefined }): Promise<Uint8Array | undefined> {
+    const deadline = this.opts.now() + CHALLENGE_WAIT_MS;
+    for (;;) {
+      if (peer.archiveChallenge) return peer.archiveChallenge;
+      if (this.opts.now() >= deadline) return undefined;
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 
   private async loadCursor(peerId: string, detectionKey: Uint8Array): Promise<bigint> {

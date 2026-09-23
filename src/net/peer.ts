@@ -111,6 +111,12 @@ export class Peer extends Emitter<PeerEvents> {
   clockOffsetSeconds = 0;
   /** Unix ms when the handshake completed. */
   connectedAt = 0;
+  /**
+   * The per-connection challenge an archiving peer issued (`p2pmsgchal`),
+   * unsolicited after verack. An archive query's stamp must commit to it;
+   * undefined means this peer does not archive, or has not spoken yet.
+   */
+  archiveChallenge: Uint8Array | undefined;
 
   private _state: PeerState = 'idle';
   private readonly opts: Required<Omit<PeerOptions, 'now'>> & { now: () => number };
@@ -382,6 +388,12 @@ export class Peer extends Emitter<PeerEvents> {
       case MessageType.DP2PMSG:
         if (!this.connected) return;
         this.emit('message', { stem: m.command === MessageType.DP2PMSG, payload: m.payload });
+        return;
+      case MessageType.P2PMSGCHAL:
+        // An archiving peer's per-connection challenge. Our archive query
+        // stamps have to commit to it, so one grind buys one query at one
+        // node on one connection and nowhere else.
+        if (m.payload.length === 32) this.archiveChallenge = m.payload.slice();
         return;
       case MessageType.P2PMSGS:
         // Response to an archive query we sent. Unsolicited ones are the

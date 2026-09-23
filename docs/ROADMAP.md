@@ -214,14 +214,23 @@ Still open in M4:
   group secrets stale: every group we administer rotates automatically, and
   groups we only belong to are reported through `groupsNeedRekey` so the user
   can ask an admin rather than assume the revocation was complete.
-- ✅ **Sent-message mirror.** An outgoing message is encrypted to the
-  recipient, so our other devices cannot read it; without a mirror a paired
-  phone shows half of every conversation. Copies are batched — the second
-  envelope costs a second proof of work — and an account with one device sends
-  none at all.
-- State sync for contacts, group epochs and read state still rides only the
-  ordinary message path; there is no catch-up for a device that was offline
-  while those changed.
+- ✅ **Sent-message mirror, through the chat layer.** An outgoing message is
+  encrypted to the recipient, so our other devices cannot read it; without a
+  mirror a paired phone shows half of every conversation. Copies are batched —
+  the second envelope costs a second proof of work — and an account with one
+  device sends none at all. `ChatClient` ingests them as its own messages,
+  membership frames included, which is also how a second device learns about a
+  group: the frame carrying a group's state and epoch secret goes to the
+  group's members, and our own devices are not among them.
+- ✅ **Reply keys suspended on a multi-device account.** A one-shot reply key
+  lives in one device's memory, so publishing it told the contact to send
+  where our other devices could not read. An account with more than one device
+  keeps the conversation on the account prekey instead, at the cost of that
+  session's forward secrecy, until the ratchet lands.
+- State sync for contacts and read state still rides only the ordinary message
+  path; there is no catch-up for a device that was offline while those
+  changed. Group epoch secrets now arrive over the mirror, but only while the
+  device is online to hear it.
 - The grace window. The previous prekey stays decryptable so in-flight messages
   are not lost, which means a revoked device can still read that window;
   applications should say so, and an immediate cut-off is not yet offered.

@@ -1149,7 +1149,10 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     } catch {
       return; // stale or backwards: ignore
     }
-    this.keys.setInbox(this.keyring.prekey.sk, this.keyring.prekey.pub);
+    // rotateInbox, not setInbox: the key we are leaving goes into the grace
+    // ring, so mail from senders who have not yet discovered the new bundle
+    // still arrives here — the same window the primary keeps.
+    this.keys.rotateInbox(this.keyring.prekey.sk, this.keyring.prekey.pub);
     this.emit('accountEpoch', { epoch: grant.accountEpoch, deviceList: grant.deviceList });
   }
 

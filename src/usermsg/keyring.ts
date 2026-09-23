@@ -137,15 +137,24 @@ export class Keyring {
    *
    * Used when the account rotates — after a revocation, for instance — since a
    * secondary cannot derive the new secret itself.
+   *
+   * The prekey being replaced becomes the grace key, exactly as it does on the
+   * primary. Senders keep addressing the old one until they discover the new
+   * bundle, and a device that dropped it the moment the rotation arrived would
+   * silently miss everything they sent in between — while the primary, which
+   * keeps a grace window, showed it. A phone quietly missing messages the
+   * desktop has is the worst shape that failure can take.
    */
   adoptAccountEpoch(accountSecret: Uint8Array, epoch: number): void {
     if (this.seed) throw new Error('the primary derives its own epochs');
     if (accountSecret.length !== 32) throw new Error('account secret must be 32 bytes');
     if (epoch < this.state.epoch) throw new Error('account epoch went backwards');
+    const advancing = epoch > this.state.epoch;
     this.grantedSecret = accountSecret.slice();
     this.state = { epoch, rotatedAt: this.now() };
+    const previous = this._prekey;
     this._prekey = deriveInboxPrekey(accountSecret);
-    this._previous = undefined;
+    this._previous = advancing ? previous : undefined;
     this._fmd = undefined;
     this._clueKey = undefined;
   }

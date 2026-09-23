@@ -92,6 +92,32 @@ describe('Keyring account epochs', () => {
     expect(toHex(k.previousPrekey!.pub)).toBe(before.prekey);
   });
 
+  it('keeps the retired prekey as a grace key when a secondary adopts an epoch', async () => {
+    // Senders keep addressing the old prekey until they discover the new
+    // bundle. A device that dropped it the instant the rotation arrived would
+    // miss everything sent in between, while the primary — which keeps a
+    // grace window — showed it.
+    const seed = new Uint8Array(32).fill(0x27);
+    const primary = await Keyring.open(seed, new MemoryStore());
+    const secondary = await Keyring.forDevice(
+      { accountSecret: primary.accountSecret(), identityPub: primary.identity.pub, epoch: primary.epoch },
+      new MemoryStore(),
+    );
+    const before = toHex(secondary.prekey.pub);
+    expect(before).toBe(toHex(primary.prekey.pub));
+
+    await primary.rotateAccountEpoch();
+    secondary.adoptAccountEpoch(primary.accountSecret(), primary.epoch);
+    expect(toHex(secondary.prekey.pub)).toBe(toHex(primary.prekey.pub));
+    expect(toHex(secondary.previousPrekey!.pub)).toBe(before);
+
+    // Re-adopting the SAME epoch is not a rotation and must not push the
+    // current key out as if it were one.
+    secondary.adoptAccountEpoch(primary.accountSecret(), primary.epoch);
+    expect(secondary.previousPrekey).toBeUndefined();
+    expect(() => secondary.adoptAccountEpoch(primary.accountSecret(), primary.epoch - 1)).toThrow(/backwards/);
+  });
+
   it('does not let an old account secret derive the next one', async () => {
     const seed = new Uint8Array(32).fill(0x26);
     const k = await Keyring.open(seed, new MemoryStore());

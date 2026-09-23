@@ -388,7 +388,15 @@ export class ChatClient extends Emitter<ChatEvents> {
     if (frame.type === ChatFrameType.PROFILE) {
       if (!(await this.isKnown(m.from))) return;
       const profile = parseProfileBody(frame.body);
+      // The bus does not order messages, so two profile updates can arrive
+      // the wrong way round and leave a contact's name reverted to the older
+      // one. Keep the newest by the sender's own clock, which is the only
+      // ordering the two updates share.
+      const stampKey = `profileat/${keyOf(m.from)}`;
+      const seen = await this.store.get(NS, stampKey);
+      if (seen && new Reader(seen).i64() > frame.timestamp) return;
       await this.store.put(NS, `profile/${keyOf(m.from)}`, frame.body);
+      await this.store.put(NS, stampKey, new Writer().i64(frame.timestamp).finish());
       this.emit('profile', { identity: m.from, profile });
       return;
     }

@@ -60,7 +60,7 @@ afterEach(() => {
   for (const c of open.splice(0)) c.close();
 });
 
-async function mk(hub: Hub, seedByte: number) {
+async function mk(hub: Hub, seedByte: number, now?: () => number) {
   const store = new MemoryStore();
   const client = await MessagingClient.create({
     network: 'regtest',
@@ -77,7 +77,7 @@ async function mk(hub: Hub, seedByte: number) {
   });
   open.push(client);
   await client.connect();
-  const chat = await ChatClient.create({ client, store });
+  const chat = await ChatClient.create({ client, store, ...(now ? { now } : {}) });
   open.push(chat);
   return { client, chat };
 }
@@ -303,6 +303,37 @@ describe('ChatClient receipts, profiles and search', () => {
     expect(ev.profile.displayName).toBe('alex');
     expect((await b.chat.profileOf(a.chat.identity))?.displayName).toBe('alex');
     expect((await a.chat.profile())?.displayName).toBe('alex');
+  }, 30000);
+
+  it('keeps the newest profile when two updates arrive out of order', async () => {
+    // The bus does not order messages. Without a tiebreak the older update
+    // wins by arriving last, and a contact's name silently reverts.
+    const hub = new Hub();
+    let clock = 2_000_000;
+    const a = await mk(hub, 96, () => clock);
+    const b = await mk(hub, 97);
+    await a.client.addContact(b.client.bundle());
+    await b.client.addContact(a.client.bundle());
+    await a.chat.markKnown(b.chat.identity);
+    await b.chat.markKnown(a.chat.identity);
+
+    const first = waitFor(b.chat, 'profile');
+    await a.chat.setProfile({ displayName: 'current', statusText: '' }, [b.chat.identity]);
+    await first;
+    expect((await b.chat.profileOf(a.chat.identity))?.displayName).toBe('current');
+
+    // The same sender, an hour earlier by its own clock: an update that was
+    // overtaken in flight.
+    clock -= 3_600_000;
+    await a.chat.setProfile({ displayName: 'stale', statusText: '' }, [b.chat.identity]);
+    await waitFor(b.chat, 'message', () => true, 500).catch(() => undefined);
+    expect((await b.chat.profileOf(a.chat.identity))?.displayName).toBe('current');
+
+    // A genuinely newer one still lands.
+    clock += 7_200_000;
+    const third = waitFor(b.chat, 'profile', (e) => e.profile.displayName === 'newest');
+    await a.chat.setProfile({ displayName: 'newest', statusText: '' }, [b.chat.identity]);
+    await third;
   }, 30000);
 
   it('shares our profile automatically when accepting a request', async () => {

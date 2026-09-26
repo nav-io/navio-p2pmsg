@@ -25,7 +25,21 @@ the wins.
   untestable without a detection key — this is FMD's central property and the
   reason a hash-based tag was rejected (`fmd.md`).
 - **Not** the topic, for 1:1 and group messages. The topic lives inside the
-  ECIES layer. Public BROADCAST topics are, by design, visible to everyone.
+  ECIES layer. Public BROADCAST topics are, by design, visible to everyone —
+  a broadcast envelope is encrypted to a published key, which is what makes it
+  public. Nothing that should stay private may ride one.
+
+  That rule was broken once, and it is worth recording why it was easy to
+  miss. Prekey discovery used to broadcast on `_p2pmsg/prekey/<hash of the
+  target's identity>`. The hash looks protective, but an identity is a public
+  address, so anyone holding an address could precompute its topic and watch
+  the bus: a live oracle saying "somebody is about to contact this account",
+  timestamped, with the reply arriving moments later to confirm the account is
+  online. It leaked exactly the thing the envelope format works hardest to
+  hide, on the one message type that had to name a target. A discovery request
+  is now an envelope addressed to the target's identity key, which is the one
+  key of theirs a stranger is certain to hold, so the topic is inside the
+  ciphertext and the request looks like any other envelope to somebody.
 - Timing and volume, always. If you send at 09:00 every day, that is visible.
 - Which node you connect to. BIP324 hides the content of the link, not its
   existence.

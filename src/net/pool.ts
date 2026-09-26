@@ -217,7 +217,10 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       dnsSeeds: options.dnsSeeds ?? DEFAULT_DNS_SEEDS[options.network],
       allowDns: options.allowDns ?? node,
       transportFactory: options.transportFactory ?? defaultTransportFactory,
-      services: options.services ?? ServiceFlags.NODE_P2PMSG_LEAF,
+      // Whatever the caller asks for, plus the format bit. NODE_P2PMSG_LEAF
+      // says "do not stem to me"; it does not say which envelopes we can read,
+      // and a peer that cannot tell will not send us any.
+      services: (options.services ?? ServiceFlags.NODE_P2PMSG_LEAF) | RELAY_SERVICE,
       userAgent: options.userAgent ?? '/navio-p2pmsg:0.1.0/',
       peerOptions: options.peerOptions ?? {},
       minBackoffMs: options.minBackoffMs ?? 1_000,

@@ -1,7 +1,5 @@
 /** Library-reserved topics and the ack payload codec. */
-import { sha256 } from '@noble/hashes/sha256';
 import { Reader, Writer } from '../common/serialize.js';
-import { toHex } from '../common/bytes.js';
 import { MSG_ID_BYTES, RESERVED_TOPIC_PREFIX } from './frame.js';
 
 export const TOPIC_PREKEY_RESPONSE = '_p2pmsg/prekey';
@@ -33,11 +31,25 @@ export const TOPIC_BUNDLE = '_p2pmsg/bundle';
 /** Default topic for 1:1 application messages when the app gives none. */
 export const TOPIC_DEFAULT = 'msg';
 
-/** Discovery request topic for an identity: `_p2pmsg/prekey/<hex(sha256(identity))>` (64 hex = 15+64 = 79 bytes < 64? no). */
-export function prekeyRequestTopic(identity: Uint8Array): string {
-  // Topic max is 64 bytes; prefix is 15 bytes, so use the first 24 bytes (48 hex) of the hash.
-  return `${TOPIC_PREKEY_RESPONSE}/${toHex(sha256(identity).subarray(0, 24))}`;
-}
+/**
+ * Asking a contact for their current bundle.
+ *
+ * A fixed topic, carried inside an envelope addressed to the target's IDENTITY
+ * key. It used to be a broadcast on `_p2pmsg/prekey/<hash of the identity>`,
+ * which leaked the one thing the envelope format works hardest to hide.
+ * Broadcast envelopes are encrypted to a PUBLISHED key — that is what makes
+ * them public — so anybody could read the topic, and the identity is a public
+ * address, so anybody holding an address could precompute its hash and watch
+ * the bus for it. That is a live social-graph oracle: "somebody is about to
+ * contact this account", timestamped, for every address the observer knows,
+ * with the response arriving moments later to say the account is online.
+ *
+ * Addressing the identity key instead costs nothing and reveals nothing: the
+ * topic is inside the ciphertext, and only the account that owns the identity
+ * can open it. On the wire a discovery request is now just another envelope to
+ * somebody.
+ */
+export const TOPIC_PREKEY_REQUEST = '_p2pmsg/prekeyreq';
 
 export function isReservedTopic(topic: string): boolean {
   return topic.startsWith(RESERVED_TOPIC_PREFIX);

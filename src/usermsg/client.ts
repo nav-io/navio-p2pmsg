@@ -109,7 +109,7 @@ import {
   TOPIC_PREKEY_RESPONSE,
   isReservedTopic,
   parseAcks,
-  prekeyRequestTopic,
+  TOPIC_PREKEY_REQUEST,
   serializeAcks,
   type AckEntry,
 } from './topics.js';
@@ -241,7 +241,11 @@ export interface MessagingClientOptions {
   /** Lifetime of reply keys we hand out. Default 7 d. */
   replyKeyTtlMs?: number;
   userAgent?: string;
-  /** Service bits to advertise. Default `NODE_P2PMSG_LEAF`. */
+  /**
+   * Service bits to advertise. Default `NODE_P2PMSG_LEAF`. The envelope
+   * format bit (`NODE_P2PMSG_V2`) is always added: a peer that cannot tell
+   * which format we read will not send us anything.
+   */
   services?: bigint;
   now?: () => number;
 }
@@ -369,6 +373,15 @@ export class MessagingClient extends Emitter<MessagingEvents> {
 
     this.keys = new BusKeys();
     this.keys.setInbox(keyring.prekey.sk, keyring.prekey.pub);
+    if (keyring.isPrimary) {
+      // Discovery requests arrive addressed to the IDENTITY key. It is the one
+      // key of ours a stranger is certain to hold — it is the address they
+      // looked us up by — and using it keeps the request opaque: no topic in
+      // the clear, nothing derived from the address, just an envelope to
+      // somebody. Only the primary registers it, because only the primary can
+      // sign the bundle that answers.
+      this.keys.addSessionKey(keyring.requireIdentitySecret().sk, keyring.identity.pub);
+    }
     if (this.device) {
       // A secondary is individually addressable at its own device key. The
       // primary needs that to hand it a new account secret after a rotation —
@@ -769,7 +782,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     // The reply key is reused across attempts, so a late answer to an earlier
     // attempt still resolves, and the last attempt fluffs: by then reliability
     // matters more than hiding which node the lookup entered from. The request
-    // names no requester either way — only a hash of who is being looked up.
+    // names no requester, and — being addressed to the target's identity key
+    // rather than broadcast on a topic derived from it — does not name the
+    // target to anyone but the target either.
     const attempts = Math.max(1, DISCOVERY_ATTEMPTS);
     const gap = Math.floor(timeoutMs / attempts);
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -780,9 +795,11 @@ export class MessagingClient extends Emitter<MessagingEvents> {
         replyPub: pub,
         payload: new Uint8Array(0),
       };
-      const body = serializeUserMsgFrame({ topic: prekeyRequestTopic(id), body: serializeAuthFrame(frame) });
+      const body = serializeUserMsgFrame({ topic: TOPIC_PREKEY_REQUEST, body: serializeAuthFrame(frame) });
       try {
-        await this.bus.sendBroadcast(USER_DATA_KIND, body, { stem: attempt < attempts - 1 });
+        // To the identity key: the one key of the target we are guaranteed to
+        // hold, since it IS the address we are looking up.
+        await this.bus.send(USER_DATA_KIND, id, body, { stem: attempt < attempts - 1 });
       } catch (e) {
         this.emit('error', e instanceof Error ? e : new Error(String(e)));
       }
@@ -1517,7 +1534,7 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     const frameSigner = frame.devicePub ?? frame.sender;
     if (frameSigner && equal(frameSigner, ourSigner) && scope !== 'broadcast') return;
 
-    if (topic.startsWith(TOPIC_PREKEY_RESPONSE + '/')) return this.onPrekeyRequest(topic, frame, scope);
+    if (topic === TOPIC_PREKEY_REQUEST) return this.onPrekeyRequest(frame, m);
     if (topic === TOPIC_PREKEY_RESPONSE) return this.onPrekeyResponse(frame, m);
     if (topic === TOPIC_ACK) return this.onAck(frame, scope);
     if (topic.startsWith(TOPIC_PAIR + '/')) return this.onPairingAnnounce(topic, frame);
@@ -1590,9 +1607,13 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     for (const { key } of await this.store.list(NS_SEEN)) this.seen.set(key, true);
   }
 
-  private async onPrekeyRequest(topic: string, frame: AuthFrame, scope: MessageScope): Promise<void> {
-    if (scope !== 'broadcast' || !frame.replyPub) return;
-    if (topic !== prekeyRequestTopic(this.keyring.identity.pub)) return; // someone else's
+  private async onPrekeyRequest(frame: AuthFrame, m: InboundMessage): Promise<void> {
+    if (!frame.replyPub) return;
+    // It decrypted under our identity key, which is the whole check: nobody
+    // else can produce an envelope we open with it, so there is no "somebody
+    // else's request" case left to filter out.
+    if (m.recipient !== 'session' || !m.sessionPub) return;
+    if (!equal(m.sessionPub, this.keyring.identity.pub)) return;
     // A secondary device cannot sign a bundle, and answering with an
     // unsigned one would be worse than staying quiet: the primary answers.
     if (!this.keyring.isPrimary) return;

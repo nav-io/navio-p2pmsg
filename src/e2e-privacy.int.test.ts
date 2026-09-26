@@ -23,6 +23,10 @@ import { equal, fromHex, toHex, utf8 } from './common/bytes.js';
 import { ServiceFlags } from './net/messages.js';
 import { type Envelope, parseEnvelope } from './bus/envelope.js';
 import { FMD_GAMMA, fmdTest } from './bus/fmd.js';
+import { sha256 } from '@noble/hashes/sha256';
+import { BROADCAST_SECRET } from './bus/bls.js';
+import { decrypt } from './bus/ecies.js';
+import { parseUserMsgFrame } from './usermsg/frame.js';
 import { decodeIdentity } from './usermsg/bundle.js';
 
 const haveBinary = existsSync(DEFAULT_NAVIOD);
@@ -162,6 +166,45 @@ describe.skipIf(!haveBinary)('end to end: what a node can and cannot learn', () 
     // The sender's identity is inside the ciphertext, signed — but only the
     // recipient can get at it. An observer holding the envelope cannot.
     expect(contains(envelope.enc.ciphertext, alice.keyring.identity.pub)).toBe(false);
+  }, 600000);
+
+  it('does not announce who is being looked up', async () => {
+    // Discovery used to ride a BROADCAST on a topic derived from the target's
+    // identity. Broadcast envelopes are encrypted to a published key — that is
+    // what makes them public — and an identity is a public address, so anyone
+    // holding an address could precompute its topic and watch the bus: a live
+    // social-graph oracle saying "somebody is about to contact this account",
+    // with the reply following moments later to confirm the account is online.
+    const alice = await account(134);
+    const bob = await account(135);
+    const eve = await observer(136);
+    await alice.addContact(bob.bundle());
+
+    eve.seen.length = 0;
+    await alice.discover(bob.identity);
+    await waitUntil(() => eve.seen.length > 0, 60000);
+
+    // Eve reads every broadcast on the bus, because everyone can.
+    let readable = 0;
+    let mentionsBob = 0;
+    for (const { env } of eve.seen) {
+      const body = decrypt(BROADCAST_SECRET, env.enc, new Uint8Array([env.kind]));
+      if (!body) continue;
+      readable++;
+      try {
+        const { topic } = parseUserMsgFrame(body);
+        if (topic.includes(toHex(sha256(decodeIdentity(bob.identity))).slice(0, 48))) mentionsBob++;
+      } catch {
+        // Not a library frame; a real observer sees these too.
+      }
+    }
+    // Whatever else is on the bus, no readable frame names Bob.
+    expect(mentionsBob).toBe(0);
+    // And the request itself was not readable at all: it is an envelope to
+    // Bob's identity key, so the topic is inside the ciphertext.
+    const flagged = eve.seen.filter(({ env }) => env.flag.length === 0);
+    expect(flagged.length).toBeGreaterThan(0);
+    expect(readable).toBe(0);
   }, 600000);
 
   it('makes two messages to one person look unrelated', async () => {

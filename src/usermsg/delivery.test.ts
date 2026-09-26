@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { ACK_WHOLE, parseAcks, prekeyRequestTopic, serializeAcks } from './topics.js';
+import { ACK_WHOLE, parseAcks, serializeAcks, TOPIC_PREKEY_REQUEST } from './topics.js';
 import { PayloadTooLargeError, Reassembler, chunkCapacity, splitChunks } from './chunker.js';
 import { Outbox } from './outbox.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { MAX_TOPIC_BYTES, serializeAuthFrame, serializeUserMsgFrame } from './frame.js';
 
 describe('topics', () => {
-  it('prekey request topic fits the 64-byte cap', () => {
-    const t = prekeyRequestTopic(new Uint8Array(48));
-    expect(t.startsWith('_p2pmsg/prekey/')).toBe(true);
-    expect(new TextEncoder().encode(t).length).toBeLessThanOrEqual(MAX_TOPIC_BYTES);
+  it('the prekey request topic is fixed, and names nobody', () => {
+    // It used to be `_p2pmsg/prekey/<hash of the identity>` on a broadcast,
+    // which anyone holding the address could precompute and watch for. A fixed
+    // topic inside an envelope addressed to the identity key names no one.
+    expect(TOPIC_PREKEY_REQUEST).toBe('_p2pmsg/prekeyreq');
+    expect(new TextEncoder().encode(TOPIC_PREKEY_REQUEST).length).toBeLessThanOrEqual(MAX_TOPIC_BYTES);
   });
   it('ack codec round trips', () => {
     const acks = [

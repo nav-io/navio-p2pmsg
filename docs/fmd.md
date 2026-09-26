@@ -145,7 +145,8 @@ prekey epoch, and `security.md` records the exposure.
 
 The clue key is 1152 B — too large for the `navid1…`/`navmsg1…` strings, which
 stay as they are (decision 24). It travels in **bundle v2**, returned by the
-existing `_p2pmsg/prekey` discovery response:
+existing discovery response (`_p2pmsg/prekeyreq` asks, addressed to the
+target's identity key so the request names nobody on the wire):
 
 ```
 u8      version = 2

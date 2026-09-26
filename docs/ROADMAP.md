@@ -145,9 +145,15 @@ the removed member provably cannot read the next message.
 
 Still open in M3:
 
-- Group archive retrieval across a rekey boundary (querying with the detection
-  keys of several epochs).
-- Ownership transfer, and admitting a request-to-join invite.
+- ✅ **Retrieval across a rekey boundary.** `syncGroupArchives()` queries once
+  per epoch secret held, because a rekey moves the group's clue key and a
+  single detection key would silently miss everything sent under the others.
+  Getting it to work also took a fix in the archive client, whose cursor was
+  per peer and shared across detection keys — the first query advanced it past
+  the window and every later key found nothing.
+- ✅ **Ownership transfer, and admitting a request-to-join invite.** Both
+  covered end to end: a link that carries no key is useless until an admin
+  turns it into membership, and a former owner cannot take the group back.
 - Divergent-history conflicts are surfaced as an error; there is no UI-level
   resolution path yet.
 

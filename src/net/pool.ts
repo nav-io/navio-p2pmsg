@@ -1,6 +1,6 @@
 /**
  * Keeps `targetPeers` handshaked peers alive. Address sources: explicit seeds,
- * DNS seeds (Node only), and `addr`/`addrv2` gossip filtered on NODE_P2PMSG.
+ * DNS seeds (Node only), and `addr`/`addrv2` gossip filtered on the relay bit.
  * Reconnects with capped exponential backoff and jitter.
  */
 import { Emitter } from './emitter.js';
@@ -11,6 +11,23 @@ import { formatHostPort, parsePeerAddress, type Transport } from './transport.js
 import { WsTransport } from './ws-transport.js';
 
 export type TransportFactory = (address: string, network: NetworkName) => Transport;
+
+/**
+ * The relay capability this build's envelopes need.
+ *
+ * NODE_P2PMSG means envelope v1, which this SDK no longer sends. Gossiping
+ * ourselves towards v1 relays would cost a dial, ten messages and a
+ * disconnection each time — they answer a v2 envelope with discouragement
+ * points, not with a parse error we could see.
+ */
+const RELAY_SERVICE = ServiceFlags.NODE_P2PMSG_V2;
+
+/**
+ * How long to leave an address alone after finding it cannot relay for us.
+ * Long, because the answer will not change until the operator upgrades, and
+ * short enough that a rolling upgrade is noticed the same day.
+ */
+const UNUSABLE_PEER_BACKOFF_MS = 30 * 60_000;
 
 export interface PeerPoolOptions {
   network: NetworkName;
@@ -92,6 +109,12 @@ interface BookEntry {
    * the address.
    */
   v2Failed?: boolean;
+  /**
+   * The peer handshook but does not advertise the relay capability we need,
+   * so it can never carry our traffic. Not a failure to back off from
+   * gradually — a standing answer, until the operator upgrades.
+   */
+  relayUnusable?: boolean;
   address: string;
   services: bigint;
   source: AddressSource;
@@ -262,7 +285,13 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
    * fluff → `p2pmsg` to every connected peer. Returns the number of peers it went to.
    */
   broadcast(envelope: Uint8Array, opts: { stem: boolean }): number {
-    const connected = [...this.slots.values()].filter((s) => s.connected);
+    // Only peers that speak this envelope format. A seed address is taken on
+    // the operator's word and never filtered, so this is the last place a v1
+    // relay can be kept out — and sending to one is not a no-op, it is ten
+    // messages and a disconnection, repeated on every reconnect.
+    const connected = [...this.slots.values()].filter(
+      (s) => s.connected && hasService(s.peer.peerVersion?.services ?? 0n, RELAY_SERVICE),
+    );
     if (connected.length === 0) return 0;
     const targets = opts.stem ? [connected[Math.floor(this.opts.random() * connected.length)]!] : connected;
     let n = 0;
@@ -307,7 +336,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       return false;
     }
     if (source === 'gossip') {
-      if (!hasService(services, ServiceFlags.NODE_P2PMSG)) return false;
+      if (!hasService(services, RELAY_SERVICE)) return false;
       if (this.book.size >= this.opts.maxAddresses && !this.evictOne()) return false;
     }
     this.book.set(key, {
@@ -445,7 +474,13 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       this.dialing.delete(address);
       const e = this.book.get(address);
       if (e) {
-        if (!wasConnected && slot.triedV2 && !e.v2Failed && this.opts.transportVersion !== 'v2-only') {
+        if (e.relayUnusable) {
+          // Handshook fine and cannot carry our envelopes. Redialling it on
+          // the ordinary backoff would mean reconnecting every few seconds
+          // forever, to be told the same thing.
+          e.failures = 0;
+          e.nextTryAt = this.opts.now() + UNUSABLE_PEER_BACKOFF_MS;
+        } else if (!wasConnected && slot.triedV2 && !e.v2Failed && this.opts.transportVersion !== 'v2-only') {
           // Not a bad address — just one that does not speak v2. Retry it
           // immediately as v1 and do not count this against its backoff, or a
           // network of v1 nodes would look like a network of dead ones.
@@ -471,11 +506,24 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       .then(() => {
         this.dialing.delete(address);
         if (!this.running || peer.closed) return;
+        entry.services |= peer.peerVersion!.services;
+        // A peer that cannot relay this envelope format is not a peer for our
+        // purposes. Keeping it would be worse than not having it: it fills a
+        // slot, it counts towards targetPeers, and the client reports itself
+        // connected while nothing it sends can go anywhere. Drop it and let
+        // maintain() dial somebody who can, and remember the address so we do
+        // not immediately come back to it.
+        if (!hasService(entry.services, RELAY_SERVICE)) {
+          entry.relayUnusable = true;
+          this.emit('error', new Error(`${id}: peer does not relay this envelope format`));
+          peer.close();
+          return;
+        }
+        entry.relayUnusable = false;
         slot.connected = true;
         entry.failures = 0;
         if (isIPv6Address(address)) this.v6DeprioritisedUntil = 0;
         entry.lastSeen = this.opts.now();
-        entry.services |= peer.peerVersion!.services;
         this.emit('peer', this.info(slot));
         // Over target (e.g. an address was added while dialing)? Trim.
         if (this.connectedCount > this.opts.targetPeers) peer.close();
@@ -489,7 +537,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
   private onGossip(addrs: NetAddress[]): void {
     let added = 0;
     for (const a of addrs) {
-      if (!hasService(a.services, ServiceFlags.NODE_P2PMSG)) continue;
+      if (!hasService(a.services, RELAY_SERVICE)) continue;
       if (a.port === 0) continue;
       if (this.addPeerAddress(formatHostPort(a.host, a.port), { services: a.services, source: 'gossip' })) added++;
       if (added >= 100) break;

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { randomBytes, utf8 } from '../common/bytes.js';
+import { randomBytes, toHex, utf8 } from '../common/bytes.js';
 import { generateSecret, publicKey } from './bls.js';
 import { BusClient, type EnvelopeSink, type InboundMessage, PayloadTooLarge } from './client.js';
-import { expectedPayloadHash, parseEnvelope, replayKey, serializeEnvelope } from './envelope.js';
+import { expectedPayloadHash, messageKey, parseEnvelope, serializeEnvelope } from './envelope.js';
 import { FMD_FLAG_SIZE } from './fmd.js';
 import { BusKeys } from './keyring.js';
 import { PowGrinder } from './pow-grinder.js';
@@ -100,9 +100,10 @@ describe('BusClient', () => {
     const nonce = grindSync(reflagged.pow, BITS);
     expect(nonce).not.toBeUndefined();
     reflagged.pow = withNonce(reflagged.pow, nonce!);
-    // It is a valid, distinct envelope on the wire...
-    expect(replayKey(reflagged)).not.toEqual(replayKey(env));
-    // ...and still the same message here.
+    // It is a valid envelope carrying a flag nobody else chose...
+    expect(toHex(reflagged.flag)).not.toBe(toHex(env.flag));
+    // ...and still the same message, here and at every relay.
+    expect(messageKey(reflagged)).toEqual(messageKey(env));
     expect(b.client.onWire(2, false, serializeEnvelope(reflagged))).toBe('replay');
     await b.client.drain();
     expect(calls).toBe(1);

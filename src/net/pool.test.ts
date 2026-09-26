@@ -60,7 +60,7 @@ describe('PeerPool', () => {
     expect(events).toHaveLength(3);
     expect(new Set(net.dials).size).toBe(3); // no duplicate concurrent dials
     for (const p of pool.peers()) {
-      expect(p.services).toBe(ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG);
+      expect(p.services).toBe(ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG_V2);
       expect(p.userAgent).toBe('/MockNode:0.0.1/');
       expect(p.id.startsWith(p.address + '#')).toBe(true);
     }
@@ -107,10 +107,12 @@ describe('PeerPool', () => {
     pool.stop();
   });
 
-  it('learns gossiped addresses that advertise NODE_P2PMSG and dials them', async () => {
+  it('learns gossiped addresses that advertise the relay bit and dials them', async () => {
     const gossip: NetAddress[] = [
-      { host: '7.7.7.7', port: 18444, services: ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG, time: 1 },
-      { host: '8.8.8.8', port: 18444, services: ServiceFlags.NODE_NETWORK, time: 1 }, // no p2pmsg → ignored
+      { host: '7.7.7.7', port: 18444, services: ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG_V2, time: 1 },
+      { host: '8.8.8.8', port: 18444, services: ServiceFlags.NODE_NETWORK, time: 1 }, // no relay bit → ignored
+      // v1 only: it cannot parse what we send, and it charges us for sending it.
+      { host: '6.6.6.6', port: 18444, services: ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG, time: 1 },
     ];
     const net = mockNetwork((addr) => (addr === '5.5.5.5:18444' ? { addrs: gossip } : {}));
     const pool = makePool({ seeds: ['5.5.5.5'], targetPeers: 2, transportFactory: net.factory });

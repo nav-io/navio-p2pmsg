@@ -39,6 +39,18 @@ export const ServiceFlags = {
    * Orthogonal to relaying: an archiving node normally sets NODE_P2PMSG too.
    */
   NODE_P2PMSG_ARCHIVE: 1n << 26n,
+  /**
+   * Relays the overlay in envelope v2 — the format with a detection flag
+   * bound into the proof of work.
+   *
+   * Separate from NODE_P2PMSG, which means v1, because the two cannot be told
+   * apart otherwise and routing blind between them is hostile in both
+   * directions: a v1 node handed a v2 envelope cannot parse it and charges
+   * the sender 10 discouragement points, disconnecting at 100. An upgraded
+   * client that dials an old node is kicked after ten messages and starts the
+   * cycle again on reconnect.
+   */
+  NODE_P2PMSG_V2: 1n << 27n,
 } as const;
 
 export function hasService(services: bigint, flag: bigint): boolean {

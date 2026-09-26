@@ -85,24 +85,26 @@ little-endian must be `<= (2^256-1) >> bits`, timestamp within ±120 s.
 
 ## Replay cache
 
-Replay key becomes `SHA256(u8 kind ‖ payload_hash)` — that is, it now covers
-the flag. Two envelopes with identical ciphertext but different flags are
-distinct messages and both relay. This is intentional: it lets a sender
-re-flag a retransmission for a recipient whose clue key changed. It is also a
-small amplification surface, bounded by the fact that each variant costs a
-fresh proof of work.
+Replay key is `SHA256(u8 kind ‖ MsgHash)` — the kind and the ciphertext. It is
+nonce-independent, so re-grinding buys nothing, and it deliberately does **not**
+cover the detection flag.
 
-**Relay identity is not delivery identity.** The flag is routing metadata and
-it is not secret: anyone who saw an envelope can strip or rewrite the flag,
-regrind once, and put it back on the bus. Under a single cache that copy is a
-new message everywhere — relayed again, and dispatched to the recipient again.
+An earlier draft keyed it on `payload_hash`, which since envelope v2 commits to
+the flag. That made a message's identity depend on a field that is neither
+secret nor authenticated to the sender: anyone who saw an envelope could attach
+or rewrite a flag over somebody else's ciphertext, pay the proof of work once,
+and have the same ciphertext relayed and dispatched again as a brand new
+message. The grind is paid by the attacker; the flood and the duplicate
+delivery are paid by everybody else.
 
-So a recipient keys its duplicate check on the CIPHERTEXT,
-`SHA256(u8 kind ‖ MsgHash)`, while relays keep the flag-covering key. The
-re-flagged copy still propagates, which is what the re-flagging rule is for,
-and the recipient sees one message. `replayKey()` and `deliveryKey()` in
-`src/bus/envelope.ts` are the two, and navio-core's relay cache matches the
-first byte for byte.
+The behaviour that keying lost — reusing one ciphertext under a new flag, to
+re-flag a retransmission for a recipient whose clue key rotated — is not worth
+that. A sender who genuinely needs to re-flag re-encrypts, which is a new
+ciphertext and honestly a new message.
+
+`messageKey()` in `src/bus/envelope.ts` is the SDK's copy of this rule, and the
+node's relay cache and the SDK's delivery check are now the same function of
+the same bytes.
 
 ## Delivery is an attempt, not a promise
 

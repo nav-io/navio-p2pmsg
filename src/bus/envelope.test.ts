@@ -9,8 +9,7 @@ import {
   MAX_ENVELOPE_BYTES,
   MAX_FLAG_BYTES,
   parseEnvelope,
-  deliveryKey,
-  replayKey,
+  messageKey,
   serializeEnvelope,
 } from './envelope.js';
 import { FMD_FLAG_SIZE } from './fmd.js';
@@ -78,40 +77,31 @@ describe('envelope', () => {
     expect(() => parseEnvelope(serializeEnvelope(env))).toThrow(/flag too large/);
   });
 
-  it('replayKey = sha256(kind || payload_hash), independent of nonce', () => {
+  it('messageKey = sha256(kind || MsgHash), independent of nonce and of the flag', () => {
     const env = makeEnvelope();
-    const expected = sha256(concat(new Uint8Array([env.kind]), env.pow.payloadHash));
-    expect(replayKey(env)).toEqual(expected);
+    const expected = sha256(concat(new Uint8Array([env.kind]), packetMsgHash(env.enc)));
+    expect(messageKey(env)).toEqual(expected);
     const nonce = grindSync(env.pow, 8)!;
-    expect(replayKey({ ...env, pow: withNonce(env.pow, nonce) })).toEqual(expected);
-    expect(replayKey({ ...env, kind: 8 })).not.toEqual(expected);
+    expect(messageKey({ ...env, pow: withNonce(env.pow, nonce) })).toEqual(expected);
+    expect(messageKey({ ...env, kind: 8 })).not.toEqual(expected);
   });
 
-  it('replayKey separates two flags over the same ciphertext', () => {
-    // Deliberate: it lets a sender re-flag a retransmission for a recipient
-    // whose clue key rotated, and each variant costs a fresh grind.
-    const a = makeEnvelope(10, 7, randomBytes(FMD_FLAG_SIZE));
-    const b = { ...a, flag: randomBytes(FMD_FLAG_SIZE) };
-    b.pow = { ...a.pow, payloadHash: expectedPayloadHash(b) };
-    expect(packetMsgHash(a.enc)).toEqual(packetMsgHash(b.enc));
-    expect(replayKey(a)).not.toEqual(replayKey(b));
-  });
-
-  it('deliveryKey does NOT separate them: to a recipient it is one message', () => {
-    // The flag is routing metadata. Anyone who saw an envelope can rewrite it
-    // and regrind once, so keying delivery on the wire identity would let a
-    // bystander have the same message dispatched again and again.
+  it('a re-flagged ciphertext is the same message, not a new one', () => {
+    // The flag is a retrieval hint and it is not secret. If it were part of a
+    // message's identity, anyone who saw an envelope could attach or rewrite
+    // a flag over somebody else's ciphertext, pay one proof of work, and have
+    // it flooded and delivered again — the cost paid by the wrong party.
     const a = makeEnvelope(10, 7, randomBytes(FMD_FLAG_SIZE));
     const reflagged = { ...a, flag: randomBytes(FMD_FLAG_SIZE) };
     reflagged.pow = { ...a.pow, payloadHash: expectedPayloadHash(reflagged) };
     const stripped = { ...a, flag: new Uint8Array(0) };
     stripped.pow = { ...a.pow, payloadHash: expectedPayloadHash(stripped) };
-    expect(deliveryKey(reflagged)).toEqual(deliveryKey(a));
-    expect(deliveryKey(stripped)).toEqual(deliveryKey(a));
-    // A different ciphertext is still a different message.
-    expect(deliveryKey(makeEnvelope(10, 7, a.flag))).not.toEqual(deliveryKey(a));
-    // And the kind is part of it, as it is for the wire identity.
-    expect(deliveryKey({ ...a, kind: 8 })).not.toEqual(deliveryKey(a));
+    expect(packetMsgHash(a.enc)).toEqual(packetMsgHash(reflagged.enc));
+    expect(messageKey(reflagged)).toEqual(messageKey(a));
+    expect(messageKey(stripped)).toEqual(messageKey(a));
+    // A different ciphertext is a different message, which is how a sender
+    // whose recipient rotated re-flags: by re-encrypting.
+    expect(messageKey(makeEnvelope(10, 7, a.flag))).not.toEqual(messageKey(a));
   });
 });
 

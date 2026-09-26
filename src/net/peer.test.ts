@@ -28,7 +28,7 @@ describe('Peer', () => {
     expect(peer.peerVersion?.userAgent).toBe('/naviod:1.0/');
     expect(peer.peerVersion?.startHeight).toBe(77);
     expect(peer.peerVersion?.version).toBe(70016);
-    expect(peer.peerVersion?.services).toBe(ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG);
+    expect(peer.peerVersion?.services).toBe(ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG_V2);
     expect(peer.clockOffsetSeconds).toBeGreaterThanOrEqual(41);
     expect(peer.clockOffsetSeconds).toBeLessThanOrEqual(43);
 

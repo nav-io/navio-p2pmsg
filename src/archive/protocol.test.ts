@@ -89,6 +89,9 @@ describe('archive protocol', () => {
     expect(archiveStampBits(4, 1000, 4)).toBe(4); // exactly the free allowance
     expect(archiveStampBits(4, 2000, 4)).toBe(5);
     expect(archiveStampBits(4, 1000, 8)).toBe(5);
+    // A low-precision scan is not as cheap as its precision suggests: the
+    // fixed per-entry cost is priced as two extra multiplications.
+    expect(archiveStampBits(4, 3000, 1)).toBe(5);
     expect(archiveStampBits(4, MAX_ARCHIVE_SCAN_ENTRIES, FMD_GAMMA)).toBeGreaterThan(
       archiveStampBits(4, 1000, 4),
     );

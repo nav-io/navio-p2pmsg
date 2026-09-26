@@ -18,7 +18,7 @@ import {
   MAX_ENVELOPE_BYTES,
   MAX_FLAG_BYTES,
   parseEnvelope,
-  deliveryKey,
+  messageKey,
   serializeEnvelope,
 } from './envelope.js';
 import { type BusKeys, type RecipientClass } from './keyring.js';
@@ -125,7 +125,7 @@ export class BusClient {
   readonly keys: BusKeys;
   readonly powBits: number;
   private readonly sink: EnvelopeSink;
-  /** Ciphertexts already dispatched, so a re-flagged copy is not delivered twice. */
+  /** Messages already dispatched, keyed on the ciphertext. */
   private readonly delivered: ReplayCache;
   private readonly handlers = new Map<number, Set<MessageHandler>>();
   private readonly clockOffset: () => number;
@@ -207,12 +207,12 @@ export class BusClient {
     if (!bytesEqual(env.pow.payloadHash, expectedPayloadHash(env))) return 'badpow';
     if (!checkPoW(env.pow, this.powBits)) return 'badpow';
     if (!archived && !checkTimestamp(env.pow, this.now(), this.tolerance)) return 'stale';
-    // Keyed on the CIPHERTEXT, not on the wire identity. A relay tells two
-    // flaggings of one ciphertext apart on purpose — that is how a sender
-    // re-flags a retransmission for a recipient whose clue key rotated — but
-    // to a recipient they are the same message, and anyone who saw an envelope
-    // can rewrite its flag, regrind once and have it dispatched again.
-    if (!this.delivered.add(deliveryKey(env))) return 'replay';
+    // Keyed on the CIPHERTEXT, with the flag left out, exactly as navio-core
+    // keys its relay cache. The flag is a retrieval hint and it is not
+    // secret: anyone who saw an envelope could otherwise rewrite it over
+    // somebody else's ciphertext, pay one proof of work, and have the message
+    // flooded and delivered all over again.
+    if (!this.delivered.add(messageKey(env))) return 'replay';
     if (this.closed) return 'accepted';
     this.decryptQueue = this.decryptQueue
       .then(() => new Promise<void>((r) => setTimeout(r, 0)))
@@ -284,7 +284,7 @@ export class BusClient {
     const env: Envelope = { kind, pow, flag, enc };
     const bytes = serializeEnvelope(env);
     // Our own message will be fluffed back to us by peers; pre-mark it seen.
-    this.delivered.add(deliveryKey(env));
+    this.delivered.add(messageKey(env));
     this.sink.broadcast(bytes, { stem: opts.stem ?? true });
     return bytes;
   }

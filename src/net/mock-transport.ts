@@ -248,7 +248,7 @@ export class MockNode extends Emitter<MockNodeEvents> {
   private buildVersion(): VersionMessage {
     return {
       version: this.opts.version ?? PROTOCOL_VERSION,
-      services: this.opts.services ?? ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG,
+      services: this.opts.services ?? ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG_V2,
       timestamp: BigInt(Math.floor(Date.now() / 1000) + (this.opts.clockSkewSeconds ?? 0)),
       addrRecv: { services: 0n, host: '127.0.0.1', port: 0 },
       addrFrom: { services: 0n, host: '::', port: 0 },

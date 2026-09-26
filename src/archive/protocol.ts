@@ -73,8 +73,12 @@ export function archiveStampHash(s: ArchiveStamp): Uint8Array {
  * rejected as underpowered.
  */
 export function archiveStampBits(baseBits: number, scanBudget: number, precision: number): number {
-  let units = Math.max(scanBudget, 1) * Math.max(precision, 1);
-  const freeAllowance = 1000 * 4;
+  // (precision + 2), not precision: every entry costs a point decompress and
+  // a subgroup check on top of its precision multiplications, so a
+  // low-precision scan is not as cheap as a bare product suggests. Pricing it
+  // as one unit underpriced exactly the query an attacker would pick.
+  let units = Math.max(scanBudget, 1) * (precision + 2);
+  const freeAllowance = 1000 * 6;
   let extra = 0;
   while (units > freeAllowance && extra < 8) {
     units >>= 1;

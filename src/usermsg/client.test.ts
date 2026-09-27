@@ -590,6 +590,28 @@ describe('device revocation', () => {
     expect(verifyDeviceList(primary.keyring.identity.pub, list).ok).toBe(true);
   }, 40000);
 
+  it('jitters the ack delay, so a message and its ack are not a matched pair', async () => {
+    // The two envelopes are otherwise unlinkable — different sizes, different
+    // ephemeral keys, no recipient field. A constant gap links them anyway,
+    // and links the two parties through it.
+    const hub = new Hub();
+    const c = await mk(hub, 78, { ackDelayMs: 1000 });
+    const delays = new Set<number>();
+    for (let i = 0; i < 40; i++) {
+      delays.add((c as unknown as { ackDelay(): number }).ackDelay());
+    }
+    expect(delays.size).toBeGreaterThan(30); // not a constant
+    for (const d of delays) {
+      expect(d).toBeGreaterThanOrEqual(500);
+      expect(d).toBeLessThanOrEqual(1500);
+    }
+    // The average stays where the caller put it, so batching behaviour is
+    // unchanged; only the constant to correlate on is gone.
+    const mean = [...delays].reduce((a, b) => a + b, 0) / delays.size;
+    expect(mean).toBeGreaterThan(800);
+    expect(mean).toBeLessThan(1200);
+  }, 20000);
+
   it('refuses a bundle from before an epoch it already knows about', async () => {
     // Discovery re-sends while it waits, so an answer to an earlier attempt
     // can arrive after a rotation. A signed bundle stays valid forever, so

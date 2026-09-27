@@ -138,6 +138,13 @@ request-to-join for anything that might be forwarded.
   with the group detection key alongside its own; a rekey changes the group
   clue key, so a member must query with the detection keys of every epoch it
   needs to catch up on.
+
+  Note what that key is. It is shared by every member — that is what lets one
+  envelope serve the group — so it does not select "messages for me", it
+  selects every message in the group. A member catching up therefore hands the
+  archive the ability to pick out the group's whole traffic at that precision,
+  and a member who later leaves keeps that ability for the epochs it was in.
+  `security.md` records both.
 - **Multi-device.** Epoch secrets are account state and sync to all of a
   member's devices (`devices.md`).
 - **Revoked devices.** Revoking a device rekeys every group it belonged to.

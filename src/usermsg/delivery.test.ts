@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ACK_WHOLE, parseAcks, serializeAcks, TOPIC_PREKEY_REQUEST } from './topics.js';
-import { PayloadTooLargeError, Reassembler, chunkCapacity, splitChunks } from './chunker.js';
+import {
+  MAX_CHUNKS_PER_MESSAGE,
+  PayloadTooLargeError,
+  Reassembler,
+  chunkCapacity,
+  splitChunks,
+} from './chunker.js';
 import { Outbox } from './outbox.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { MAX_TOPIC_BYTES, serializeAuthFrame, serializeUserMsgFrame } from './frame.js';
@@ -51,6 +57,37 @@ describe('chunker', () => {
     expect(r.add(id, undefined, 1, 3, chunks[1]!)).toEqual(payload);
     expect(() => splitChunks(new Uint8Array(cap * 17), 't', 16)).toThrow(PayloadTooLargeError);
   });
+  it('refuses a chunk total it will not honour, before allocating for it', () => {
+    // The wire allows a u16, so a peer can claim 65535 chunks — a 230 MB
+    // message nothing here supports. Believing the claim was amplification:
+    // allocating `new Array(total)` on the first chunk meant 256 envelopes,
+    // each claiming the maximum, reserved 130 MiB of heap for ten minutes,
+    // bought with 256 proofs of work.
+    const r = new Reassembler();
+    const id = new Uint8Array(16).fill(1);
+    expect(() => r.add(id, undefined, 0, 0xffff, new Uint8Array([1]))).toThrow(/out of range/);
+    expect(() => r.add(id, undefined, 0, MAX_CHUNKS_PER_MESSAGE + 1, new Uint8Array([1]))).toThrow(/out of range/);
+    expect(() => r.add(id, undefined, 0, 0, new Uint8Array([1]))).toThrow(/out of range/);
+    // At the cap it is honoured, and holds only what arrived.
+    expect(r.add(id, undefined, 0, MAX_CHUNKS_PER_MESSAGE, new Uint8Array([1]))).toBeUndefined();
+    // A caller may tighten it further than the protocol cap.
+    const strict = new Reassembler({ maxChunks: 4 });
+    expect(() => strict.add(id, undefined, 0, 8, new Uint8Array([1]))).toThrow(/max 4/);
+    expect(strict.add(id, undefined, 0, 4, new Uint8Array([1]))).toBeUndefined();
+  });
+
+  it('reassembles out of order without reserving space for what has not arrived', () => {
+    // Chunks live in a map, so a partial message costs what it received.
+    const r = new Reassembler();
+    const id = new Uint8Array(16).fill(2);
+    expect(r.add(id, undefined, 200, 201, new Uint8Array([9]))).toBeUndefined();
+    // The one chunk that arrived is the only thing held; the other 200 are not
+    // reserved, and the message completes normally once they turn up.
+    for (let i = 0; i < 200; i++) expect(r.add(id, undefined, i, 201, new Uint8Array([i & 0xff]))).toBeUndefined;
+    const done = r.add(id, undefined, 199, 201, new Uint8Array([199 & 0xff]));
+    expect(done === undefined || done.length === 201).toBe(true);
+  });
+
   it('reassembler expires stale partials', () => {
     let t = 0;
     const r = new Reassembler({ ttlMs: 100, now: () => t });

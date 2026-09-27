@@ -2,10 +2,16 @@
 
 The retrieval side of offline delivery.
 
-> **Implemented** in navio-core, branch `feat/p2pmsg-archive` (worktree
-> `~/dev/navio-fmd`), 2026-09-22. This document now describes what was built;
-> where the original design and the implementation diverged, the reason is
-> noted inline. The SDK client is still to be written.
+> **Implemented on both sides.** navio-core: merged into
+> `feat/p2pmsg-envelope-v2-fmd` (PR #474) when #475 landed. SDK:
+> `src/archive/`, verified against a node built from that branch. This document
+> describes what was built; where the original design and the implementation
+> diverged, the reason is noted inline.
+>
+> A query is **refused over a plaintext link**. The detection key is the one
+> secret in the exchange and whoever holds it can test every future flag at
+> that precision until the clue key rotates, so BIP324 is not optional here —
+> see "Privacy of the query".
 
 ## Role
 
@@ -148,10 +154,16 @@ detect and costly to emit.
 
 **Privacy of the query.** The detection key is the one secret in the exchange
 and it must not reach an on-path observer, which is why the SDK implements
-BIP324 (decision 26, `wire-v2.md`). It is opt-in (`transportVersion: 'v2'`)
-while most of the network is still v1, so an application that calls
-`syncArchive()` should enable it — over a v1 link the key is sent in the
-clear.
+BIP324 (decision 26, `wire-v2.md`).
+
+It is no longer left to the application to remember. `transportVersion`
+defaults to `v2` — opportunistic, with a per-address fallback — and a query
+over a v1 link is **refused** rather than sent in the clear. Whoever holds a
+detection key can test every future flag at that precision until the clue key
+rotates, so a plaintext link is not a degraded option for this message, it is
+the wrong one. The sync reports itself incomplete rather than as an empty
+archive, so a client retries instead of concluding there was nothing to
+fetch.
 
 ## Client behaviour
 

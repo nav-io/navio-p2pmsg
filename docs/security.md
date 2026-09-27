@@ -41,6 +41,19 @@ the wins.
   key of theirs a stranger is certain to hold, so the topic is inside the
   ciphertext and the request looks like any other envelope to somebody.
 - Timing and volume, always. If you send at 09:00 every day, that is visible.
+- **How a message pairs with its ack**, partially. The two envelopes are
+  otherwise unlinkable — different sizes, different ephemeral keys, no
+  recipient field — but a constant delay between them would link them anyway,
+  and link the two parties through them. The delay is jittered over half to one
+  and a half times the configured value, which removes the constant without
+  changing the average. It is a mitigation, not a cure: enough samples recover
+  the mean.
+- **How long a message was, from its chunk count.** A payload past one envelope
+  goes out as several, each padded to the same bucket, in quick succession. The
+  ladder hides size within a bucket; it does not hide that six envelopes went
+  out at once, which puts the payload within one chunk of 6 × 3584 bytes. For
+  anything whose length is itself sensitive, the direct channel
+  (`stream.md`) carries it in one stream instead.
 - Which node you connect to. BIP324 hides the content of the link, not its
   existence.
 - Size within a bucket is hidden by the padding ladder (64/256/1024/3072/3584);
@@ -83,9 +96,22 @@ Everything above, plus:
 - **Your detection key at the precision you chose**, and therefore the ability
   to test *future* flags at that precision until you rotate the account epoch.
   This is inherent to FMD, not a flaw in the deployment.
-- On a **v1** link, so does anyone on the path — the query is not encrypted.
-  Enable `transportVersion: 'v2'` before using `syncArchive()`; it is not the
-  default yet only because most of the network still speaks v1.
+- On a plaintext link it would reach anyone on the path too, so a query over a
+  v1 transport is refused rather than sent. `transportVersion` defaults to
+  `v2`.
+- **A whole group, from one member's group detection key.** The group clue key
+  is shared by every member — that is what lets one envelope serve all of them
+  — so a group detection key does not select "messages for me", it selects
+  every message in the group. A member catching up hands an archive the ability
+  to pick out the group's entire traffic, at the precision that member chose,
+  for as long as the epoch lasts. There is no way to narrow it: in a group
+  there is no "to".
+- **An epoch a former member was in, retrievably.** Removal rekeys, so a former
+  member reads nothing from `e+1` onward. For the epochs it *was* in it keeps
+  the detection key, and that is a retrieval capability and not only a record
+  of what it received: it can ask an archive later for that epoch's traffic,
+  including messages it was never sent at the time. Groups that need
+  forgetting need a new group.
 - The set of envelopes matching it — your real messages plus `2^-n` of
   everything else. It does not learn which are which.
 - Your IP, and your sync timing and frequency.
@@ -107,6 +133,10 @@ account epoch periodically, and prefer an archive node you run.
 - Everything from the epochs it was in, including ciphertext it recorded then.
 - **Nothing from epoch `e+1` onward**, which is why removal always rekeys
   (`groups.md`).
+- More than it was sent: it holds that epoch's group detection key, so it can
+  retrieve the epoch's traffic from an archive afterwards — see the archive
+  node above. Removal stops the future, not the past, and the past includes
+  what an archive still holds.
 
 ### Revoked device
 
@@ -158,6 +188,32 @@ account epoch periodically, and prefer an archive node you run.
 - **Post-quantum security.** BLS12-381, secp256k1 and the ratchet are all
   classical. A recorded transcript is a future problem.
 - **Group calls, or calls with any server assistance.**
+
+## Resource limits an attacker pays to test
+
+Proof of work makes a message cost something, but only where a message is
+required. Anything a peer can make us allocate or compute *per envelope* has to
+be bounded by what arrived, not by what the envelope claims.
+
+- **Chunk totals are not believed.** The wire allows a u16, so a peer may claim
+  65535 chunks. Reserving space for the claim on the first chunk — which is
+  what the reassembler used to do — turned 256 envelopes into 130 MiB of heap
+  held for ten minutes, bought with 256 proofs of work. Chunks now live in a
+  map, so memory tracks arrivals, and a total past the cap
+  (`MAX_CHUNKS_PER_MESSAGE`, tightened by the client to its own `maxChunks`) is
+  refused before anything is allocated.
+- **Partial messages are bounded** at 256 pending, oldest evicted, with a
+  ten-minute expiry.
+- **Discovery answers are bounded** per reply key, and concurrent lookups of
+  one identity collapse onto a single in-flight request, so a storm of forty
+  costs the target one signature rather than forty.
+- **Relay is metered** at the node, by a token bucket, so a valid envelope
+  cannot be turned into unbounded fan-out. An invalid one is rejected before
+  anything expensive happens, and costs the sender discouragement points.
+
+Each of these is exercised end to end in `e2e-abuse.int.test.ts`, which asks
+the question that decides whether a limit is a defence: does an uninvolved pair
+still exchange messages while the attack is running.
 
 ## Deliberate trade-offs
 

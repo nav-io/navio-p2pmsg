@@ -36,9 +36,27 @@ export class PayloadTooLargeError extends Error {
   }
 }
 
+/**
+ * The most chunks one message may claim.
+ *
+ * The wire allows a u16, so a peer can claim 65535 — a 230 MB message, which
+ * nothing here supports. Believing the claim was an amplification: the old
+ * reassembler allocated `new Array(total)` on the FIRST chunk, so 256 envelopes
+ * each claiming the maximum reserved 130 MiB of heap for ten minutes, bought
+ * with 256 proofs of work. Chunks are now held in a map, so memory tracks what
+ * actually arrived, and a total past this cap is refused before anything is
+ * allocated at all.
+ *
+ * 256 chunks is ~900 KB, well past what the SDK will send (`maxChunks`,
+ * default 16) and far short of what an attacker needs for the claim to be
+ * worth making.
+ */
+export const MAX_CHUNKS_PER_MESSAGE = 256;
+
 interface Pending {
-  parts: Array<Uint8Array | undefined>;
-  received: number;
+  /** Sparse on purpose: memory is proportional to chunks received, not claimed. */
+  parts: Map<number, Uint8Array>;
+  total: number;
   firstSeen: number;
   sender?: string;
 }
@@ -47,7 +65,13 @@ interface Pending {
 export class Reassembler {
   private pending = new Map<string, Pending>();
   constructor(
-    private readonly opts: { ttlMs?: number; maxPending?: number; now?: () => number } = {},
+    private readonly opts: {
+      ttlMs?: number;
+      maxPending?: number;
+      /** Largest chunk total to believe. Default `MAX_CHUNKS_PER_MESSAGE`. */
+      maxChunks?: number;
+      now?: () => number;
+    } = {},
   ) {}
 
   /**
@@ -55,23 +79,26 @@ export class Reassembler {
    * Duplicate chunks are ignored. Mismatched totals are rejected (throws).
    */
   add(msgId: Uint8Array, sender: Uint8Array | undefined, idx: number, total: number, part: Uint8Array): Uint8Array | undefined {
+    // Check the claim before allocating anything for it.
+    const cap = this.opts.maxChunks ?? MAX_CHUNKS_PER_MESSAGE;
+    if (total < 1 || total > cap) throw new Error(`chunk total ${total} out of range (max ${cap})`);
+    if (idx >= total) throw new Error('chunk index out of range');
+
     this.sweep();
     const key = `${toHex(msgId)}:${sender ? toHex(sender) : '-'}`;
     let p = this.pending.get(key);
     if (!p) {
       if (this.pending.size >= (this.opts.maxPending ?? 256)) this.evictOldest();
-      p = { parts: new Array<Uint8Array | undefined>(total), received: 0, firstSeen: this.now() };
+      p = { parts: new Map(), total, firstSeen: this.now() };
       this.pending.set(key, p);
     }
-    if (p.parts.length !== total) throw new Error('chunk total mismatch');
-    if (idx >= total) throw new Error('chunk index out of range');
-    if (!p.parts[idx]) {
-      p.parts[idx] = part;
-      p.received++;
-    }
-    if (p.received < total) return undefined;
+    if (p.total !== total) throw new Error('chunk total mismatch');
+    if (!p.parts.has(idx)) p.parts.set(idx, part);
+    if (p.parts.size < total) return undefined;
     this.pending.delete(key);
-    return concat(...(p.parts as Uint8Array[]));
+    const ordered: Uint8Array[] = [];
+    for (let i = 0; i < total; i++) ordered.push(p.parts.get(i)!);
+    return concat(...ordered);
   }
 
   private now(): number {

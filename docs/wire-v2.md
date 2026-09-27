@@ -1,8 +1,15 @@
 # Wire v2
 
-> **Implemented in navio-core** on branch `feat/p2pmsg-envelope-v2-fmd`
-> (worktree `~/dev/navio-fmd`), 2026-09-22, exactly as specified below. The SDK
-> side is still to be written. BIP324 (decision 26) is **not** started.
+> **Implemented on both sides.** navio-core: branch
+> `feat/p2pmsg-envelope-v2-fmd` (PR #474, still open), which also carries the
+> archive work after #475 merged into it. SDK: `src/bus/`, `src/net/bip324/`
+> and `src/archive/`, verified against a node built from that branch.
+>
+> Envelope v2 is a relay-breaking change, and a v1 node charges 10
+> discouragement points for an envelope it cannot parse, so the two formats
+> have separate service bits and route independently — `NODE_P2PMSG_V2`, see
+> "Rollout" below. BIP324 (decision 26) is implemented and now **on by
+> default**, opportunistic with a per-address fallback.
 
 Changes to the bus wire format. Everything here must match navio-core byte for
 byte; v1 wire facts in `DESIGN.md` remain accurate except where superseded
@@ -105,6 +112,33 @@ ciphertext and honestly a new message.
 `messageKey()` in `src/bus/envelope.ts` is the SDK's copy of this rule, and the
 node's relay cache and the SDK's delivery check are now the same function of
 the same bytes.
+
+## Rollout: the formats must not route into each other
+
+A v1 node cannot parse a v2 envelope. It does not shrug: `OnWire()` returns
+`RejectInvalid` and the caller charges the sender 10 discouragement points, so
+ten envelopes disconnect it and a reconnecting peer starts the cycle again. On a
+real network those are bans.
+
+Both formats advertised `NODE_P2PMSG`, so neither side could tell the other
+apart, and a v2 sender routed v2 envelopes at v1 peers by design. Measured in a
+mixed network of one master node and two from the branch: the v2 relay earned 30
+points in three messages, and a client dialling a v1 node was disconnected after
+ten sends. Shipping that would have discouraged every upgraded node across the
+un-upgraded network.
+
+`NODE_P2PMSG_V2 = 1 << 27` separates them. A v2 node advertises it and **not**
+`NODE_P2PMSG`, because it rejects a v1 header outright: claiming v1 would invite
+traffic it answers with discouragement points. A leaf must advertise the format
+bit too — `NODE_P2PMSG_LEAF` says "do not stem to me", not which envelopes the
+peer can read. Eligibility is "speaks v2" for fluff and "speaks v2 and is not a
+leaf" for stem.
+
+The SDK does the same on its side: it advertises the bit, filters gossip and
+every broadcast on it, and drops a peer that handshakes without it rather than
+hold a slot open for one that cannot carry anything. The two overlays are
+therefore disjoint until the network moves, which is the honest outcome — each
+internally healthy, neither degrading the other.
 
 ## Delivery is an attempt, not a promise
 

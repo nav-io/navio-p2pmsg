@@ -376,7 +376,9 @@ export class MessagingClient extends Emitter<MessagingEvents> {
       replyKeyTtlMs: o.replyKeyTtlMs ?? 7 * 24 * 3600 * 1000,
       messageTtlMs: o.messageTtlMs ?? 24 * 3600 * 1000,
     };
-    this.reassembler = new Reassembler({ now: this.now });
+    // Bounded by what we would ever send, not by what the wire allows: a peer
+    // claiming more chunks than this is either broken or paying for our memory.
+    this.reassembler = new Reassembler({ now: this.now, maxChunks: this.opts.maxChunks });
 
     this.keys = new BusKeys();
     this.keys.setInbox(keyring.prekey.sk, keyring.prekey.pub);
@@ -1750,8 +1752,27 @@ export class MessagingClient extends Emitter<MessagingEvents> {
     if (!dest) return; // no way to reach the sender; it will retry with a reply key
     const timer = setTimeout(() => {
       this.flushAcks(key).catch((e) => this.emit('error', e as Error));
-    }, this.opts.ackDelayMs);
+    }, this.ackDelay());
     this.pendingAcks.set(key, { identity: frame.sender, key: dest, entries: [entry], timer });
+  }
+
+  /**
+   * How long to sit on an ack, jittered.
+   *
+   * A fixed delay makes a message and its ack a matched pair on the wire. The
+   * two envelopes are otherwise unlinkable — different sizes, different
+   * ephemeral keys, no recipient field — but a flagged envelope followed by an
+   * unflagged one at exactly the configured delay, every time, links them
+   * anyway, and links the two parties through it. Spreading the delay over
+   * half to one and a half times the setting keeps the average where the
+   * caller put it while removing the constant to correlate on.
+   *
+   * It is a mitigation, not a cure: enough samples still recover the mean.
+   * `security.md` says so.
+   */
+  private ackDelay(): number {
+    const jitter = new DataView(randomBytes(2).buffer).getUint16(0) / 0x10000;
+    return Math.max(1, Math.round(this.opts.ackDelayMs * (0.5 + jitter)));
   }
 
   private async flushAcks(key: string): Promise<void> {

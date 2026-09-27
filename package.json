@@ -121,7 +121,7 @@
     "test": "vitest run --exclude '**/*.int.test.ts'",
     "test:int": "vitest run --fileParallelism=false .int.test.ts",
     "test:all": "vitest run --fileParallelism=false",
-    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",

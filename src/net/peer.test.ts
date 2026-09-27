@@ -40,7 +40,10 @@ describe('Peer', () => {
     expect(node.handshakeComplete).toBe(true);
 
     const ourVersion = decodeVersion(node.received[0]!.payload);
-    expect(ourVersion.services).toBe(ServiceFlags.NODE_P2PMSG_LEAF);
+    // Both bits: the leaf bit says "do not stem to me", the format bit says
+    // which envelopes we can read. A peer that names no format is sent none,
+    // so Peer adds it whatever the caller asked for.
+    expect(ourVersion.services).toBe(ServiceFlags.NODE_P2PMSG_LEAF | ServiceFlags.NODE_P2PMSG_V2);
     expect(ourVersion.relay).toBe(false);
     expect(ourVersion.startHeight).toBe(0);
     expect(ourVersion.userAgent).toMatch(/^\/navio-p2pmsg:/);

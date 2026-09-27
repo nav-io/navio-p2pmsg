@@ -7,24 +7,24 @@ identity, addressing, end-to-end encryption, reliable 1:1 delivery and public
 pub/sub on top of the bus. A chat app is one consumer; the library is not the
 chat app.
 
-> ### 0.2.0 will not talk to a node you have not built yourself
+> ### Needs Navio Core v0.2.2 or later
 >
-> This release sends **envelope v2** and only routes to peers advertising
-> `NODE_P2PMSG_V2`. That bit exists on nav-io/navio-core **#474, which is not
-> merged**. Against a stock node, a client connects, drops every peer as "does
+> 0.2.x sends **envelope v2** and only routes to peers advertising
+> `NODE_P2PMSG_V2`, which ships in
+> [Navio Core v0.2.2](https://github.com/nav-io/navio-core/releases/tag/v0.2.2).
+> Against an older (v0.2.1) node a client connects, drops every peer as "does
 > not relay this envelope format", and sends nothing — deliberately, because
 > the alternative is being discouraged and banned by nodes that cannot parse
-> what it sends.
+> what it sends. For v0.2.1 nodes, stay on `navio-p2pmsg@0.1.x`, which speaks
+> v1. The two overlays are disjoint on purpose (`docs/wire-v2.md`, "Rollout").
 >
-> So: run nodes built from #474, or stay on `navio-p2pmsg@0.1.x`, which speaks
-> v1 and works against today's network. There is no configuration that makes
-> 0.2.0 work against a v1 node; the two overlays are disjoint on purpose
-> (`docs/wire-v2.md`, "Rollout").
+> Node-side options some features depend on (all off by default in naviod):
 >
-> Also needs #462 (`-p2pwsbind`) for browsers, and `-v2transport=1` for
-> anything that calls `syncArchive()` — an archive query is refused over a
-> plaintext link rather than leaking the detection key. #423 and #461 are
-> already on master; #475 (the envelope archive) merged into #474.
+> - `-p2pwsbind` — WebSocket listener, required for browser clients.
+> - `-p2pmsgarchive` — makes a node an archive that `syncArchive()` can query.
+> - `-v2transport=1` — BIP324 encrypted transport. `syncArchive()` refuses to
+>   send a detection key over a plaintext link, so archive nodes should enable
+>   it.
 
 See `DESIGN.md` for the wire spec, the layer design and the C++ prerequisites
 (`NODE_P2PMSG_LEAF` service bit, `-p2pwsbind` WebSocket listener).

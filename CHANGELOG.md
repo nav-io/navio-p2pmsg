@@ -1,15 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- docs: Navio Core v0.2.2 is released and carries everything 0.2.x needs, so
+  the README and the 0.2.0 notes now point at that release instead of at
+  unmerged navio-core PRs, and list the node options some features depend on
+  (`-p2pwsbind`, `-p2pmsgarchive`, `-v2transport=1`).
+
 ## 0.2.0 — 2026-09-27
 
 **Breaking, at the wire.** Envelopes are v2 — a detection flag bound into the
 proof of work — and the SDK routes only to peers advertising
-`NODE_P2PMSG_V2`. That bit is on nav-io/navio-core #474, which is not merged,
-so this release does not work against a stock node: it connects, drops every
-peer as unable to relay this format, and sends nothing. That is deliberate. A
+`NODE_P2PMSG_V2`. That bit ships in Navio Core v0.2.2 (nav-io/navio-core
+#474), so against older nodes this release does not work: it connects, drops
+every peer as unable to relay this format, and sends nothing. That is deliberate. A
 v1 node charges 10 discouragement points for an envelope it cannot parse, so a
 client that kept sending would be disconnected after ten messages and banned on
-a real network. Stay on 0.1.x for today's network; run #474 nodes for this one.
+a real network. Stay on 0.1.x for v0.2.1 nodes.
 
 ### Offline delivery
 
@@ -71,9 +78,10 @@ a real network. Stay on 0.1.x for today's network; run #474 nodes for this one.
 
 ### Requires
 
-nav-io/navio-core #474 (envelope v2 + FMD, and the archive after #475 merged
-into it), #462 for browser WebSocket, `-v2transport=1` for archive sync. #423
-and #461 are on master.
+Navio Core v0.2.2 or later, which ships all of it: envelope v2 + FMD and the
+archive (#474, with #475), the WebSocket listener (#462, enable with
+`-p2pwsbind` for browsers), user messaging (#423) and the leaf bit (#461).
+Archive sync also needs the node to run `-v2transport=1`.
 
 
 ## 0.1.0 — 2026-09-17

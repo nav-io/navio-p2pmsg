@@ -1,6 +1,6 @@
 {
   "name": "navio-p2pmsg",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone TypeScript SDK for the Navio p2pmsg encrypted broadcast bus (no full node, no Electrum)",
   "license": "MIT",
   "type": "module",

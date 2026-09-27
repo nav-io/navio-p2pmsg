@@ -120,7 +120,7 @@ describe('ChatClient', () => {
     expect((await b.chat.requests()).map((r) => r.identity)).toEqual([a.chat.identity]);
     // Nothing landed in the conversation.
     expect((await b.chat.history(b.chat.conversationWith(a.chat.identity))).messages).toHaveLength(0);
-  }, 30000);
+  });
 
   it('delivers messages once the request is accepted', async () => {
     const hub = new Hub();
@@ -140,7 +140,7 @@ describe('ChatClient', () => {
     // Both sides derive the same conversation id with nothing negotiated.
     expect(toHex(ev.convId)).toBe(toHex(a.chat.conversationWith(b.chat.identity)));
     expect(await b.chat.unreadCount(ev.convId)).toBe(1);
-  }, 30000);
+  });
 
   it('orders a two-way exchange identically on both sides', async () => {
     const hub = new Hub();
@@ -168,7 +168,7 @@ describe('ChatClient', () => {
     // Same order on both devices: a conversation that renders differently for
     // each participant is a bug users notice immediately.
     expect(onB).toEqual(onA);
-  }, 30000);
+  });
 
   it('applies a reply, an edit, a delete and a reaction end to end', async () => {
     const hub = new Hub();
@@ -206,7 +206,7 @@ describe('ChatClient', () => {
 
     const onA = (await a.chat.history(conv)).messages;
     expect(onA.find((m) => toHex(m.id) === toHex(originalId))?.deleted).toBe(true);
-  }, 40000);
+  });
 
   it('drops messages from a blocked identity without telling them', async () => {
     const hub = new Hub();
@@ -225,7 +225,7 @@ describe('ChatClient', () => {
     expect((await b.chat.history(conv)).messages).toHaveLength(0);
     // The sender sees nothing different: blocking is never published.
     expect((await a.chat.history(conv)).messages).toHaveLength(1);
-  }, 30000);
+  });
 
   it('clears unread on markRead', async () => {
     const hub = new Hub();
@@ -242,7 +242,7 @@ describe('ChatClient', () => {
     expect(await b.chat.unreadCount(ev.convId)).toBe(1);
     await b.chat.markRead(a.chat.identity);
     expect(await b.chat.unreadCount(ev.convId)).toBe(0);
-  }, 30000);
+  });
 
   it('accepting a request lets the next message through', async () => {
     const hub = new Hub();
@@ -262,7 +262,7 @@ describe('ChatClient', () => {
     const msg = waitFor(b.chat, 'message');
     await a.chat.sendText(b.chat.identity, 'now it lands');
     expect((await msg).message.text).toBe('now it lands');
-  }, 30000);
+  });
 });
 
 describe('ChatClient receipts, profiles and search', () => {
@@ -292,7 +292,7 @@ describe('ChatClient receipts, profiles and search', () => {
     await b.chat.markRead(a.chat.identity);
     const ev = await seen;
     expect(ev.message.readBy).toHaveLength(1);
-  }, 30000);
+  });
 
   it('exchanges profiles and emits them', async () => {
     const { a, b } = await pair(82, 83);
@@ -303,7 +303,7 @@ describe('ChatClient receipts, profiles and search', () => {
     expect(ev.profile.displayName).toBe('alex');
     expect((await b.chat.profileOf(a.chat.identity))?.displayName).toBe('alex');
     expect((await a.chat.profile())?.displayName).toBe('alex');
-  }, 30000);
+  });
 
   it('keeps the newest profile when two updates arrive out of order', async () => {
     // The bus does not order messages. Without a tiebreak the older update
@@ -334,7 +334,7 @@ describe('ChatClient receipts, profiles and search', () => {
     const third = waitFor(b.chat, 'profile', (e) => e.profile.displayName === 'newest');
     await a.chat.setProfile({ displayName: 'newest', statusText: '' }, [b.chat.identity]);
     await third;
-  }, 30000);
+  });
 
   it('shares our profile automatically when accepting a request', async () => {
     // A new contact otherwise sees only a navid1… string.
@@ -352,7 +352,7 @@ describe('ChatClient receipts, profiles and search', () => {
     const profile = waitFor(a.chat, 'profile');
     await b.chat.acceptRequest(a.chat.identity);
     expect((await profile).profile.displayName).toBe('bea');
-  }, 30000);
+  });
 
   it('searches stored messages and skips deleted ones', async () => {
     const { a, b } = await pair(86, 87);
@@ -373,7 +373,7 @@ describe('ChatClient receipts, profiles and search', () => {
     await a.chat.delete(b.chat.identity, target.id);
     await gone;
     expect(await b.chat.search('pineapple')).toHaveLength(0);
-  }, 40000);
+  });
 });
 
 describe('ChatClient groups', () => {
@@ -654,7 +654,7 @@ describe('payments in a conversation', () => {
     await b.chat.notifyPaymentSent(a.chat.identity, 12345n, reference);
     const receipt = await paid;
     expect(receipt.payment.reference).toEqual(reference);
-  }, 40000);
+  });
 });
 
 describe('attachments', () => {
@@ -699,11 +699,11 @@ describe('attachments', () => {
     // Something small still works inline.
     const ref = await a.chat.attach(randomBytes(1024), { mime: 'text/plain' });
     expect(ref.mime).toBe('text/plain');
-  }, 30000);
+  });
 
   it('rejects an oversized thumbnail', async () => {
     const hub = new Hub();
     const a = await mk(hub, 166);
     await expect(a.chat.attach(randomBytes(100), { thumbnail: randomBytes(2000) })).rejects.toThrow(/thumbnail/);
-  }, 30000);
+  });
 });

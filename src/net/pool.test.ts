@@ -6,7 +6,16 @@ import { PeerPool, normalizeAddress, type PeerPoolOptions } from './pool.js';
 import { parsePeerAddress } from './transport.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
-async function until(cond: () => boolean, ms = 3000): Promise<void> {
+/**
+ * Poll until `cond`, with a ceiling generous enough to be about correctness.
+ *
+ * The pool's own timers here are milliseconds — 5 ms backoff, a 20 ms maintain
+ * tick — so what is being tested is ordering and bookkeeping, not speed. A
+ * ceiling close to those timers turns the test into a measurement of how
+ * promptly this machine schedules a timer, which says nothing about the pool.
+ * These suites run alongside native builds and whatever else is on the box.
+ */
+async function until(cond: () => boolean, ms = 30000): Promise<void> {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error('timeout waiting for condition');

@@ -102,7 +102,11 @@ function waitFor<K extends keyof MessagingEvents>(
   client: MessagingClient,
   event: K,
   pred: (v: MessagingEvents[K]) => boolean = () => true,
-  ms = 10000,
+  // Generous for the same reason discoveryTimeoutMs above is: every step here
+  // involves BLS operations, and a suite sharing a machine with native builds
+  // can be descheduled for seconds at a time. A wait that expires under load
+  // says nothing about correctness — it just fails at the wrong layer.
+  ms = 60000,
 ): Promise<MessagingEvents[K]> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
@@ -167,7 +171,7 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     await alice.send(bob.identity, utf8('found you'));
     await learned;
     expect(fromUtf8((await got).payload)).toBe('found you');
-  }, 20000);
+  });
 
   it('learns a clue key over discovery and flags later sends', async () => {
     // Discovery is the only place the clue key is published — it is 1152 bytes
@@ -200,7 +204,7 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     // A third party cannot tell the flag is Bob's.
     const stranger = await mk(hub, 22);
     expect(fmdTest(stranger.detectionKey(FMD_GAMMA), flags[0]!)).toBe(false);
-  }, 30000);
+  });
 
   it('can send unflagged when offline retrieval does not matter', async () => {
     const hub = new Hub();
@@ -215,7 +219,7 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     await alice.send(bob.identity, utf8('hi'), { archivable: false });
     await got;
     for (const b of net.sent) expect(parseEnvelope(b).flag.length).toBe(0);
-  }, 20000);
+  });
 
   it('chunks large payloads and retries until acked', async () => {
     const hub = new Hub();
@@ -228,7 +232,7 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     await alice.send(bob.identity, big);
     expect((await got).payload).toEqual(big);
     await acked;
-  }, 30000);
+  });
 
   it('retries when the recipient was offline and expires after ttl', async () => {
     const hub = new Hub();
@@ -241,7 +245,7 @@ describe('MessagingClient end to end (in-memory hub)', () => {
     const expired = await waitFor(alice, 'expired', (e) => e.msgId.every((b, i) => b === id[i]), 10000);
     expect(expired.msgId).toEqual(id);
     expect(alice.outbox.size).toBe(0);
-  }, 20000);
+  });
 
   it('public topics reach subscribers only', async () => {
     const hub = new Hub();
@@ -350,7 +354,7 @@ describe('MessagingClient device-signed frames', () => {
     // The device key still produces a valid signature; it is simply no longer
     // one of Alice's devices, which is the whole point of revocation.
     expect(delivered).toBe(false);
-  }, 40000);
+  });
 });
 
 describe('secondary device built from a pairing grant', () => {
@@ -396,7 +400,7 @@ describe('secondary device built from a pairing grant', () => {
     expect(secondary.keyring.prekey.pub).toEqual(primary.keyring.prekey.pub);
     expect(secondary.keyring.isPrimary).toBe(false);
     expect(primary.keyring.isPrimary).toBe(true);
-  }, 30000);
+  });
 
   it('cannot sign as the account, and says so plainly', async () => {
     const hub = new Hub();
@@ -416,7 +420,7 @@ describe('secondary device built from a pairing grant', () => {
     await expect(secondary.keyring.rotateAccountEpoch()).rejects.toThrow(/primary/);
     // And it holds only the epoch it was granted.
     expect(() => secondary.keyring.accountSecret(99)).toThrow(/current account epoch/);
-  }, 30000);
+  });
 
   it('both devices receive the same message from one envelope', async () => {
     const hub = new Hub();
@@ -435,7 +439,7 @@ describe('secondary device built from a pairing grant', () => {
     await sender.send(primary.identity, utf8('reaches both'));
     expect(fromUtf8((await atPrimary).payload)).toBe('reaches both');
     expect(fromUtf8((await atSecondary).payload)).toBe('reaches both');
-  }, 30000);
+  });
 
   it('sends with its device key and the recipient accepts it', async () => {
     const hub = new Hub();
@@ -463,7 +467,7 @@ describe('secondary device built from a pairing grant', () => {
     // Attributed to the ACCOUNT, not the device: which device sent it is not
     // the correspondent's concern.
     expect(ev.from).toBe(primary.identity);
-  }, 40000);
+  });
 });
 
 describe('device pairing over the bus', () => {
@@ -510,7 +514,7 @@ describe('device pairing over the bus', () => {
     });
     expect(secondary.identity).toBe(primary.identity);
     expect(secondary.keyring.prekey.pub).toEqual(primary.keyring.prekey.pub);
-  }, 40000);
+  });
 
   it('shows a different string to a device answering a substituted offer', async () => {
     const hub = new Hub();
@@ -529,7 +533,7 @@ describe('device pairing over the bus', () => {
     expect(await asked).toBeUndefined();
     expect(deviceSees).toHaveLength(6);
     expect(real.offer).not.toBe(fake.offer);
-  }, 30000);
+  });
 
   it('refuses to admit devices from a secondary', async () => {
     const hub = new Hub();
@@ -546,14 +550,14 @@ describe('device pairing over the bus', () => {
     });
     // Admitting a device means signing a certificate, which needs the seed.
     expect(() => secondary.startPairing()).toThrow(/primary/);
-  }, 30000);
+  });
 
   it('ignores a confirmation for a device that never asked', async () => {
     const hub = new Hub();
     const primary = await mk(hub, 58);
     primary.startPairing();
     await expect(primary.confirmPairing(generateDevice().pub)).rejects.toThrow(/no pairing request/);
-  }, 30000);
+  });
 });
 
 describe('device revocation', () => {
@@ -588,7 +592,7 @@ describe('device revocation', () => {
     expect(isListedDevice(list, device.pub)).toBe(false);
     expect(list.accountEpoch).toBe(res.epoch);
     expect(verifyDeviceList(primary.keyring.identity.pub, list).ok).toBe(true);
-  }, 40000);
+  });
 
   it('jitters the ack delay, so a message and its ack are not a matched pair', async () => {
     // The two envelopes are otherwise unlinkable — different sizes, different
@@ -610,7 +614,7 @@ describe('device revocation', () => {
     const mean = [...delays].reduce((a, b) => a + b, 0) / delays.size;
     expect(mean).toBeGreaterThan(800);
     expect(mean).toBeLessThan(1200);
-  }, 20000);
+  });
 
   it('refuses a bundle from before an epoch it already knows about', async () => {
     // Discovery re-sends while it waits, so an answer to an earlier attempt
@@ -634,7 +638,7 @@ describe('device revocation', () => {
     // answer takes, and there is no way to time one deterministically.
     await (peer as unknown as { learnBundle(b: unknown): Promise<void> }).learnBundle(stale);
     expect(toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey)).toBe(current);
-  }, 40000);
+  });
 
   it('moves the key the bus listens on, not just the one it publishes', async () => {
     // Rotating the keyring alone republishes a prekey nothing decrypts: every
@@ -650,7 +654,7 @@ describe('device revocation', () => {
     const got = waitFor(primary, 'message', (m) => fromUtf8(m.payload) === 'to the new key');
     await peer.send(primary.identity, utf8('to the new key'));
     expect(fromUtf8((await got).payload)).toBe('to the new key');
-  }, 40000);
+  });
 
   it('tells contacts their cached key moved when asked to', async () => {
     const hub = new Hub();
@@ -670,7 +674,7 @@ describe('device revocation', () => {
     expect(toHex(peer.contacts.get(decodeIdentity(primary.identity))!.bundle!.prekey)).toBe(
       toHex(primary.keyring.prekey.pub),
     );
-  }, 40000);
+  });
 
   it('hands the new epoch to the devices that remain', async () => {
     const hub = new Hub();
@@ -711,7 +715,7 @@ describe('device revocation', () => {
     const { primary, secondary } = await accountWithTwoDevices(hub, 74);
     await expect(secondary.revokeDevice(generateDevice().pub)).rejects.toThrow(/primary/);
     await expect(primary.revokeDevice(generateDevice().pub)).rejects.toThrow(/not on the list/);
-  }, 40000);
+  });
 
   it('never accepts a device list that goes backwards', async () => {
     // A signed list stays valid forever, so replaying the one from before a
@@ -732,7 +736,7 @@ describe('device revocation', () => {
     expect(current.accountEpoch).toBe(parseDeviceList(fresh).accountEpoch);
     expect(parseDeviceList(stale).accountEpoch).toBeLessThan(current.accountEpoch);
     expect(isListedDevice(current, device.pub)).toBe(false);
-  }, 40000);
+  });
 });
 
 describe('sent-message mirroring', () => {
@@ -784,7 +788,7 @@ describe('sent-message mirroring', () => {
     await solo.flushMirror();
     await new Promise((r) => setTimeout(r, 300));
     expect(net.sent.length).toBe(0);
-  }, 30000);
+  });
 });
 
 describe('MirrorBatcher', () => {

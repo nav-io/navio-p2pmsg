@@ -55,6 +55,12 @@ const BASE_ARGS = [
   '-daemon=0',
   '-server=1',
   '-listen=1',
+  // BIP324 on, because the SDK now prefers it and refuses some things without
+  // it — an archive query above all, since the detection key is the one secret
+  // in that exchange. A node without it is a node the SDK will not sync from,
+  // so testing against one would be testing a configuration we tell people not
+  // to use. Dropped automatically if the binary does not know the flag.
+  '-v2transport=1',
   '-p2pmsg=1',
   '-p2pmsgpowbits=8',
   '-debug=net',

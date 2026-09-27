@@ -42,6 +42,11 @@ function makePool(extra: Partial<PeerPoolOptions> & { transportFactory: PeerPool
     maxBackoffMs: 50,
     maintainIntervalMs: 20,
     peerOptions: { pingIntervalMs: 0, handshakeTimeoutMs: 500 },
+    // MockTransport speaks v1 only, and these tests count dials. The
+    // opportunistic default would add one failed v2 attempt per address —
+    // which is the real cost of that default, measured in bip324's own tests,
+    // not something to re-measure through a mock that cannot speak v2.
+    transportVersion: 'v1',
     ...extra,
   });
 }

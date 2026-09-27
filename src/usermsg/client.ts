@@ -213,6 +213,13 @@ export interface MessagingClientOptions {
    * detection key — on a v1 link anyone on the path collects it and can then
    * test every future message addressed to us.
    */
+  /**
+   * `v2` (the default) tries BIP324 and falls back to v1 per address; `v1`
+   * never tries; `v2-only` refuses a v1 link.
+   *
+   * Some things are refused over a v1 link whatever this says — an archive
+   * query, because the detection key is the one secret in that exchange.
+   */
   transportVersion?: 'v1' | 'v2' | 'v2-only';
   /**
    * Run as a SECONDARY device of an account.

@@ -78,11 +78,12 @@ SDK side, done:
 
 Still open in M1:
 
-- **Turn v2 on by default.** It is opt-in because a v1 responder answers a v2
-  opening by hanging up rather than negotiating, so every v1 peer costs a
-  wasted dial and a redial. `PeerPool` handles that and remembers the result
-  per address, but flipping the default should wait until enough of the
-  network runs v2.
+- ✅ **v2 on by default.** Flipped: `transportVersion` defaults to `v2`,
+  opportunistic, falling back per address. The cost is one wasted dial per v1
+  address, once, which the pool remembers — weighed against what a plaintext
+  link gives away, most of all the detection key in an archive query, it was
+  not a close call. That query is now refused over a v1 link rather than
+  degraded.
 - Confirm BIP324 works over the #462 WebSocket listener. `WebSocketSock` is a
   `Sock` and v2 transport detection is byte-stream based, so it is expected to
   work unchanged — expectation, not evidence, until a test proves it.

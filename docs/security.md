@@ -45,6 +45,36 @@ the wins.
   existence.
 - Size within a bucket is hidden by the padding ladder (64/256/1024/3072/3584);
   which bucket you used is not.
+- **Traffic class, from size and flag presence together.** Measured against a
+  real node, an observer who can decrypt nothing still sees:
+
+  | on the wire | what it is |
+  |---|---|
+  | 423 B, no flag | an ack, or a discovery request — indistinguishable |
+  | 1274 B, 83-byte flag | a short 1:1 message, a group message, or a read receipt — indistinguishable |
+  | 3322 B, 83-byte flag | a long 1:1 message |
+  | 3239 B, no flag | a discovery **response**, or a device mirror |
+
+  Two of those four rows are usefully ambiguous and two are not. A long
+  message is visibly a long message. A discovery response is visibly somebody
+  answering a lookup, which means an account was contacted and is online —
+  the identity is no longer leaked (see the broadcast note above) but the
+  event is. On a single-device account nothing else lands in that row.
+
+  There is no cheap fix. Flagging the response needs the requester's clue key,
+  which discovery does not have and must not ask for without destroying
+  requester anonymity; a decoy flag would make every lookup pollute an
+  archive; padding cannot reach a flagged bucket from an unflagged one, since
+  the flag is part of the envelope. Recorded rather than papered over. An
+  application that cares should keep an open channel (`stream.md`) for
+  anything whose timing matters, where none of this is visible.
+- The padding ladder hides how many devices an account has, up to seven. At
+  eight the discovery response crosses into the last bucket.
+
+  The detection key never crosses an unencrypted link: an archive query over a
+  v1 transport is refused rather than degraded, because whoever holds that key
+  can test every future flag at that precision until the clue key rotates. The
+  SDK therefore prefers BIP324 by default and falls back per address.
 
 ### Archive node
 

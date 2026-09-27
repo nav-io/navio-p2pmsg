@@ -128,6 +128,39 @@ describe.skipIf(!haveBinary)('archive retrieval <-> naviod regtest', () => {
     expect(second.accepted).toBe(0);
   }, 180000);
 
+  it('refuses to send a detection key over an unencrypted link', async () => {
+    expect(archiveSupported).toBe(true);
+    // The detection key is the one secret in an archive query, and whoever
+    // holds it can test every future flag at this precision until the clue key
+    // rotates. Over a v1 link it would cross in the clear — to the peer and to
+    // anyone on the path — so an unencrypted link is not a degraded option
+    // here, it is the wrong one.
+    const plaintext = await MessagingClient.create({
+      network: 'regtest',
+      seed: new Uint8Array(32).fill(44),
+      store: new MemoryStore(),
+      peers: [`127.0.0.1:${node.port}`],
+      targetPeers: 1,
+      dnsSeeds: [],
+      powBits: 8,
+      powWorkers: 0,
+      transportVersion: 'v1',
+      services: ServiceFlags.NODE_P2PMSG_LEAF,
+    });
+    clients.push(plaintext);
+    const refusals: string[] = [];
+    plaintext.on('error', (e) => refusals.push(e.message));
+    const connected = waitFor(plaintext, 'peer');
+    await plaintext.connect();
+    await connected;
+
+    const res = await plaintext.syncArchive({ precision: 4 });
+    expect(res.peers).toBe(1); // it found an archiving peer...
+    expect(res.received).toBe(0); // ...and told it nothing
+    expect(res.complete).toBe(false); // and said so, rather than "nothing there"
+    expect(refusals.some((m) => /unencrypted/.test(m))).toBe(true);
+  }, 120000);
+
   it('returns nothing useful to a stranger at full precision', async () => {
     expect(archiveSupported).toBe(true);
     // A client with unrelated keys queries the same archive. It gets decoys at

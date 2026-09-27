@@ -227,7 +227,13 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       maxBackoffMs: options.maxBackoffMs ?? 60_000,
       maintainIntervalMs: options.maintainIntervalMs ?? 5_000,
       maxAddresses: options.maxAddresses ?? 1000,
-      transportVersion: options.transportVersion ?? 'v1',
+      // Opportunistic v2 by default. It used to default to v1 because a v1
+      // responder answers a v2 opening by hanging up, costing a wasted dial —
+      // but the pool remembers that per address and redials as v1, so the cost
+      // is one dial per v1 address, once. Weighed against what an unencrypted
+      // link gives away, most of all the detection key in an archive query,
+      // that is not a close call.
+      transportVersion: options.transportVersion ?? 'v2',
       now: options.now ?? (() => Date.now()),
       random: options.random ?? (() => Math.random()),
     };

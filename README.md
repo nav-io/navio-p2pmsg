@@ -7,12 +7,24 @@ identity, addressing, end-to-end encryption, reliable 1:1 delivery and public
 pub/sub on top of the bus. A chat app is one consumer; the library is not the
 chat app.
 
-Requires Navio nodes running nav-io/navio-core #474 (envelope v2 + fuzzy message
-detection), #475 (envelope archive, for offline delivery) and, for browsers,
-#462 (`-p2pwsbind`). #423 (user messaging) and #461 (`NODE_P2PMSG_LEAF`) are
-already on master. **Envelope v2 is a wire break**: this SDK sends PoW header
-version 2, which a node without #474 rejects outright. Until those are deployed
-on mainnet, use regtest/testnet nodes built from those branches.
+> ### 0.2.0 will not talk to a node you have not built yourself
+>
+> This release sends **envelope v2** and only routes to peers advertising
+> `NODE_P2PMSG_V2`. That bit exists on nav-io/navio-core **#474, which is not
+> merged**. Against a stock node, a client connects, drops every peer as "does
+> not relay this envelope format", and sends nothing — deliberately, because
+> the alternative is being discouraged and banned by nodes that cannot parse
+> what it sends.
+>
+> So: run nodes built from #474, or stay on `navio-p2pmsg@0.1.x`, which speaks
+> v1 and works against today's network. There is no configuration that makes
+> 0.2.0 work against a v1 node; the two overlays are disjoint on purpose
+> (`docs/wire-v2.md`, "Rollout").
+>
+> Also needs #462 (`-p2pwsbind`) for browsers, and `-v2transport=1` for
+> anything that calls `syncArchive()` — an archive query is refused over a
+> plaintext link rather than leaking the detection key. #423 and #461 are
+> already on master; #475 (the envelope archive) merged into #474.
 
 See `DESIGN.md` for the wire spec, the layer design and the C++ prerequisites
 (`NODE_P2PMSG_LEAF` service bit, `-p2pwsbind` WebSocket listener).

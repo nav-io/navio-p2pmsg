@@ -86,7 +86,13 @@ function waitFor<K extends keyof ChatEvents>(
   c: ChatClient,
   ev: K,
   pred: (v: ChatEvents[K]) => boolean = () => true,
-  ms = 15000,
+  // Generous, and for the same reason the per-test ceilings here are: a group
+  // test derives an epoch secret and three members' keys, all BLS, and this
+  // file is the heaviest in the suite. A 15 s ceiling was the tightest in the
+  // repo sitting in front of the slowest work in it, so any contention — a
+  // parallel build, a busy laptop — failed it at the wrong layer. Correctness
+  // is what is under test; how promptly this machine gets round to it is not.
+  ms = 60000,
 ): Promise<ChatEvents[K]> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {

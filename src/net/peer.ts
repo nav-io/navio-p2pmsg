@@ -147,7 +147,13 @@ export class Peer extends Emitter<PeerEvents> {
     this.opts = {
       network: opts.network,
       userAgent: opts.userAgent ?? DEFAULT_USER_AGENT,
-      services: opts.services ?? ServiceFlags.NODE_P2PMSG_LEAF,
+      // Whatever the caller asks for, plus the envelope format bit. A peer that
+      // does not name a format is sent no p2pmsg at all — NODE_P2PMSG_LEAF
+      // says "do not stem to me", not which envelopes we can read — so
+      // leaving it to the caller means a connection that handshakes, looks
+      // healthy, and silently receives nothing. PeerPool already forced it;
+      // doing it here means a hand-built Peer cannot get it wrong either.
+      services: (opts.services ?? ServiceFlags.NODE_P2PMSG_LEAF) | ServiceFlags.NODE_P2PMSG_V2,
       startHeight: opts.startHeight ?? 0,
       relay: opts.relay ?? false,
       handshakeTimeoutMs: opts.handshakeTimeoutMs ?? 10_000,

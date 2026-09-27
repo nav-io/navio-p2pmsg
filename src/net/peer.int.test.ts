@@ -46,7 +46,11 @@ describe.skipIf(!haveBinary)('Peer <-> naviod regtest', () => {
     expect(peer.connected).toBe(true);
     const v = peer.peerVersion!;
     expect(v.version).toBeGreaterThanOrEqual(70016);
-    expect(hasService(v.services, ServiceFlags.NODE_P2PMSG)).toBe(true);
+    // The node advertises the envelope format it speaks, not the v1 relay bit:
+    // it rejects a v1 header outright, so claiming v1 would invite traffic it
+    // answers with discouragement points.
+    expect(hasService(v.services, ServiceFlags.NODE_P2PMSG_V2)).toBe(true);
+    expect(hasService(v.services, ServiceFlags.NODE_P2PMSG)).toBe(false);
     expect(hasService(v.services, ServiceFlags.NODE_NETWORK)).toBe(true);
     expect(v.userAgent).toMatch(/^\/.+\/$/);
     expect(Math.abs(peer.clockOffsetSeconds)).toBeLessThan(5);
@@ -96,7 +100,7 @@ describe.skipIf(!haveBinary)('Peer <-> naviod regtest', () => {
     await pool.start();
     await connected;
     expect(pool.peers()).toHaveLength(1);
-    expect(hasService(pool.peers()[0]!.services, ServiceFlags.NODE_P2PMSG)).toBe(true);
+    expect(hasService(pool.peers()[0]!.services, ServiceFlags.NODE_P2PMSG_V2)).toBe(true);
     expect(pool.broadcast(new Uint8Array(4), { stem: true })).toBe(1);
     pool.stop();
     await new Promise((r) => setTimeout(r, 300));

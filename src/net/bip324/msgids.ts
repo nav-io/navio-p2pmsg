@@ -11,7 +11,7 @@
 
 /**
  * Index = short id. Index 0 means "12-byte name follows". Entries 1..28 are
- * BIP324's standard assignments; 29 is Navio's own, and 30..32 are unassigned.
+ * BIP324's standard assignments, and 29..32 are unassigned.
  */
 const V2_MESSAGE_IDS: readonly string[] = [
   '', // 0: long form
@@ -43,10 +43,10 @@ const V2_MESSAGE_IDS: readonly string[] = [
   'getcfcheckpt',
   'cfcheckpt',
   'addrv2',
-  // Navio-specific. Note this is the only way `getoutputdata` is reachable at
-  // all: the name is 13 characters, one over v1's COMMAND_SIZE, so it is dead
-  // on a v1 link and only a short id can carry it.
-  'getoutputdata',
+  // Formerly Navio's `getoutputdata`. navio-core retired the message and left
+  // the id unassigned so the ones after it do not move; decoding it as a type
+  // nobody sends any more would be the silent mismatch this table guards.
+  '',
   '',
   '',
   '',

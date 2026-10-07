@@ -202,9 +202,11 @@ describe('v2 message ids', () => {
     expect(encodeMessageType('pong')).toEqual(new Uint8Array([19]));
     expect(encodeMessageType('addr')).toEqual(new Uint8Array([1]));
     expect(encodeMessageType('addrv2')).toEqual(new Uint8Array([28]));
-    // Navio's own assignment. It is the only way this message type is
-    // reachable at all: its name is 13 characters, one over v1's limit.
-    expect(encodeMessageType('getoutputdata')).toEqual(new Uint8Array([29]));
+  });
+
+  it('leaves the retired getoutputdata id unassigned, as navio-core does', () => {
+    expect(decodeMessageType(new Uint8Array([29]))).toBeUndefined();
+    expect(() => encodeMessageType('getoutputdata')).toThrow(/12 bytes/);
   });
 
   it('uses the 13-byte form for everything else', () => {

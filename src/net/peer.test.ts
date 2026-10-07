@@ -52,6 +52,22 @@ describe('Peer', () => {
     expect(peer.closed).toBe(true);
   });
 
+  it('counts a v1 link as encrypted only when its transport is (wss://)', async () => {
+    const plain = setup();
+    await plain.peer.connect();
+    expect(plain.peer.transportVersion).toBe('v1');
+    expect(plain.peer.linkEncrypted).toBe(false);
+    plain.peer.close();
+
+    const [client, server] = MockTransport.pair('wss://node.example/p2p', 'node', { secure: true });
+    new MockNode(server, { network: 'regtest' });
+    const tls = new Peer(client, { network: 'regtest', pingIntervalMs: 0 });
+    await tls.connect();
+    expect(tls.transportVersion).toBe('v1');
+    expect(tls.linkEncrypted).toBe(true);
+    tls.close();
+  });
+
   it('proceeds with an old-protocol peer (no sendaddrv2 for < 70016)', async () => {
     const { peer, node } = setup({ version: 70015 });
     await peer.connect();

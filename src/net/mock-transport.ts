@@ -28,6 +28,8 @@ export interface MockTransportOptions {
   connectDelayMs?: number;
   /** Never resolve `connect()` (simulates a black hole). */
   hangConnect?: boolean;
+  /** Report the link as encrypted below P2P, like `wss://`. */
+  secure?: boolean;
 }
 
 export class MockTransport implements Transport {
@@ -54,6 +56,10 @@ export class MockTransport implements Transport {
     // The "server" end is considered connected as soon as it exists.
     b._connected = true;
     return [a, b];
+  }
+
+  get secure(): boolean {
+    return this.opts.secure === true;
   }
 
   get connected(): boolean {

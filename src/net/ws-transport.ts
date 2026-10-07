@@ -46,6 +46,7 @@ async function loadWebSocket(): Promise<WsCtor> {
 
 export class WsTransport implements Transport {
   readonly remote: string;
+  readonly secure: boolean;
   private ws: WsLike | null = null;
   private dataCb: ((bytes: Uint8Array) => void) | null = null;
   private closeCb: ((err?: Error) => void) | null = null;
@@ -58,6 +59,7 @@ export class WsTransport implements Transport {
     opts: WsTransportOptions = {},
   ) {
     this.remote = url;
+    this.secure = /^wss:\/\//i.test(url);
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 10_000;
   }
 

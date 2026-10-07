@@ -252,6 +252,14 @@ export class Peer extends Emitter<PeerEvents> {
     return this.v2 ? 'v2' : 'v1';
   }
 
+  /**
+   * Whether bytes on this link are hidden from on-path observers: a BIP324
+   * session, or a v1 stream inside TLS (`wss://`).
+   */
+  get linkEncrypted(): boolean {
+    return this.transportVersion === 'v2' || this.transport.secure === true;
+  }
+
   /** BIP324 session id, or undefined on a v1 link. */
   get sessionId(): Uint8Array | undefined {
     return this.v2?.sessionId;

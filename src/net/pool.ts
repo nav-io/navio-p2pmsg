@@ -42,6 +42,10 @@ export interface PeerPoolOptions {
    * hanging up rather than negotiating, redials that address as v1 once and
    * remembers the result. 'v2-only' skips the redial and simply refuses
    * unencrypted peers.
+   *
+   * WebSocket peers are always dialled as v1: navio-core never attempts
+   * BIP324 on its WebSocket listener, so a v2 opening there could only fail.
+   * Under 'v2-only' that leaves `wss://` (encrypted by TLS) and skips `ws://`.
    */
   transportVersion?: 'v1' | 'v2' | 'v2-only';
   /** DNS seed hostnames. Default `['seed.nav.io']` on mainnet, none elsewhere. */
@@ -152,6 +156,10 @@ export function defaultTransportFactory(address: string, network: NetworkName): 
 
 /** Normalise an address string to its address-book key. */
 const V6_DEPRIORITISE_MS = 10 * 60 * 1000;
+
+function isWsAddress(address: string): boolean {
+  return /^wss?:\/\//i.test(address);
+}
 
 /** `[v6]:port` book addresses and ws URLs with a bracketed v6 host. */
 export function isIPv6Address(address: string): boolean {
@@ -401,7 +409,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
     if (want <= 0) return;
 
     const now = this.opts.now();
-    const candidates = [...this.book.values()].filter((e) => !this.isInUse(e.address) && e.nextTryAt <= now);
+    const candidates = [...this.book.values()].filter((e) => !this.isInUse(e.address) && e.nextTryAt <= now && this.mayDial(e.address));
     // Shuffle (Fisher–Yates) so we do not always dial in book order.
     for (let i = candidates.length - 1; i > 0; i--) {
       const j = Math.floor(this.opts.random() * (i + 1));
@@ -418,6 +426,11 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       this.maybeResolveDns();
       this.scheduleRetry(now);
     }
+  }
+
+  /** 'v2-only' refuses plaintext links, and a `ws://` link can be nothing else. */
+  private mayDial(address: string): boolean {
+    return this.opts.transportVersion !== 'v2-only' || !/^ws:\/\//i.test(address);
   }
 
   private scheduleRetry(now: number): void {
@@ -454,8 +467,8 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
     const id = `${address}#${++this.seq}`;
     // A v1 responder never speaks first, so a v2 attempt against one dies as a
     // dropped connection rather than an in-band fallback. Remember that and
-    // redial as v1.
-    const triedV2 = this.opts.transportVersion !== 'v1' && !entry.v2Failed;
+    // redial as v1. A WebSocket listener is always v1, so do not ask.
+    const triedV2 = this.opts.transportVersion !== 'v1' && !entry.v2Failed && !isWsAddress(address);
     const peer = new Peer(transport, {
       // The pool's clock, unless the caller overrode it per peer. A peer
       // measures its clock offset against ours, and that number is only

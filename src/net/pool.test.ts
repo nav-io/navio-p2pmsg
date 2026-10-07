@@ -237,3 +237,32 @@ describe('IPv6 deprioritisation', () => {
     expect(dials[1]).toBe('9.9.9.9:1');
   });
 });
+
+describe('WebSocket peers', () => {
+  // navio-core never attempts BIP324 on its WebSocket listener, so a v2
+  // opening there can only fail and cost a dial.
+  it('dials a ws:// peer as v1 directly, even when v2 is the default', async () => {
+    const net = mockNetwork();
+    const pool = makePool({ seeds: ['ws://10.0.0.9:8355/p2p'], targetPeers: 1, transportFactory: net.factory, transportVersion: 'v2' });
+    await pool.start();
+    await until(() => pool.connectedCount === 1);
+    pool.stop();
+    expect(net.dials).toEqual(['ws://10.0.0.9:8355/p2p']);
+  });
+
+  it("under 'v2-only' dials wss:// (TLS) and never plain ws://", async () => {
+    const net = mockNetwork();
+    const pool = makePool({
+      seeds: ['ws://10.0.0.8:8355/', 'wss://node.example/p2p'],
+      targetPeers: 2,
+      transportFactory: net.factory,
+      transportVersion: 'v2-only',
+    });
+    await pool.start();
+    await until(() => pool.connectedCount === 1);
+    // Give maintain() a few ticks to (wrongly) reach for the ws:// seed.
+    await new Promise((r) => setTimeout(r, 100));
+    pool.stop();
+    expect(net.dials).toEqual(['wss://node.example/p2p']);
+  });
+});

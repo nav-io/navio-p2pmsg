@@ -165,14 +165,16 @@ export class ArchiveClient {
     // responses to requests by peer id only works if there is one in flight.
     if (this.pending.has(peerId)) throw new Error(`archive query already in flight for ${peerId}`);
 
-    // The detection key is the one secret in this exchange, and over a v1 link
-    // it would cross the wire in the clear — to the peer, and to anyone on the
-    // path. Whoever holds it can test every future flag at this precision
+    // The detection key is the one secret in this exchange, and over a
+    // plaintext link it would cross the wire in the clear — to the peer, and
+    // to anyone on the path. Whoever holds it can test every future flag at this precision
     // until the clue key rotates, which is exactly the capability the whole
     // scheme exists to withhold. So an unencrypted link is not a degraded
     // option here, it is the wrong one: refuse rather than leak, and let the
-    // caller see why.
-    if (peer.transportVersion !== 'v2') {
+    // caller see why. A v1 stream inside TLS is fine: navio-core never speaks
+    // BIP324 on its WebSocket listener, so for a browser `wss://` is the only
+    // encrypted link there is.
+    if (!peer.linkEncrypted) {
       this.o.pool.emit('error', new Error(`${peerId}: refusing an archive query over an unencrypted link`));
       return undefined;
     }

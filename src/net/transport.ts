@@ -15,6 +15,12 @@ export interface Transport {
   onClose(cb: (err?: Error) => void): void;
   /** Human-readable remote identifier (`host:port` or URL). */
   readonly remote: string;
+  /**
+   * The byte stream is encrypted below the P2P layer (TLS, for `wss://`), so
+   * a v1 link over it is still private from on-path observers. Absent means
+   * no: a transport that does not know must not claim it.
+   */
+  readonly secure?: boolean;
 }
 
 export type TransportKind = 'tcp' | 'ws';

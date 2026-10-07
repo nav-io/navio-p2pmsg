@@ -77,6 +77,8 @@ export interface PeerInfo {
   version: number;
   clockOffsetSeconds: number;
   connectedAt: number;
+  /** URL of the peer's WebSocket listener, once it has announced one. */
+  wsEndpoint?: string;
 }
 
 export interface PoolMessage {
@@ -374,6 +376,7 @@ export class PeerPool extends Emitter<PeerPoolEvents> {
       version: v.version,
       clockOffsetSeconds: s.peer.clockOffsetSeconds,
       connectedAt: s.peer.connectedAt,
+      wsEndpoint: s.peer.wsEndpoint,
     };
   }
 

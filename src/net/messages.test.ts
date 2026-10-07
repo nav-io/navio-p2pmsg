@@ -7,16 +7,19 @@ import {
   DefaultPorts,
   NetworkMagic,
   PROTOCOL_VERSION,
+  MAX_WS_URL_LENGTH,
   ServiceFlags,
   bytesToIp,
   decodeAddr,
   decodeAddrV2,
   decodePing,
   decodeVersion,
+  decodeWsEndpoint,
   encodeAddr,
   encodeAddrV2,
   encodePing,
   encodeVersion,
+  encodeWsEndpoint,
   hasService,
   ipToBytes,
   type VersionMessage,
@@ -35,6 +38,9 @@ describe('constants', () => {
     expect(ServiceFlags.NODE_NETWORK).toBe(1n);
     expect(ServiceFlags.NODE_P2PMSG).toBe(0x1000000n);
     expect(ServiceFlags.NODE_P2PMSG_LEAF).toBe(0x2000000n);
+    // navio-core's protocol.h: NODE_OUTKEYS = 1 << 28, NODE_P2P_WS = 1 << 30.
+    expect(ServiceFlags.NODE_OUTKEYS).toBe(0x10000000n);
+    expect(ServiceFlags.NODE_P2P_WS).toBe(0x40000000n);
     expect(hasService(ServiceFlags.NODE_NETWORK | ServiceFlags.NODE_P2PMSG, ServiceFlags.NODE_P2PMSG)).toBe(true);
     expect(hasService(ServiceFlags.NODE_NETWORK, ServiceFlags.NODE_P2PMSG)).toBe(false);
   });
@@ -183,5 +189,38 @@ describe('addr', () => {
 
   it('rejects oversize addr lists', () => {
     expect(() => decodeAddrV2(new Writer().compactSize(1001).finish())).toThrow(/too large/);
+  });
+});
+
+describe('wsendpoint', () => {
+  it('encodes a little-endian u16 port then a var-string url', () => {
+    expect(toHex(encodeWsEndpoint({ port: 8355, url: '' }))).toBe('a32000');
+    expect(toHex(encodeWsEndpoint({ port: 443, url: 'wss://n.example/p2p' }))).toBe(
+      'bb0113' + toHex(new TextEncoder().encode('wss://n.example/p2p')),
+    );
+  });
+
+  it('round trips', () => {
+    for (const e of [
+      { port: 8355, url: '' },
+      { port: 443, url: 'wss://node.example.com/p2p' },
+      { port: 80, url: 'ws://node.example.com' },
+    ]) {
+      expect(decodeWsEndpoint(encodeWsEndpoint(e))).toEqual(e);
+    }
+  });
+
+  it('ignores what navio-core ignores: port 0, a non-WebSocket url', () => {
+    expect(decodeWsEndpoint(encodeWsEndpoint({ port: 0, url: '' }))).toBeNull();
+    expect(decodeWsEndpoint(encodeWsEndpoint({ port: 443, url: 'https://n.example/' }))).toBeNull();
+    expect(decodeWsEndpoint(encodeWsEndpoint({ port: 443, url: 'WSS://n.example/' }))).toBeNull();
+  });
+
+  it('rejects an overlong url and a truncated payload', () => {
+    const at = 'wss://' + 'a'.repeat(MAX_WS_URL_LENGTH - 6);
+    expect(decodeWsEndpoint(encodeWsEndpoint({ port: 1, url: at }))).toEqual({ port: 1, url: at });
+    expect(() => decodeWsEndpoint(encodeWsEndpoint({ port: 1, url: at + 'a' }))).toThrow(/too long/);
+    expect(() => decodeWsEndpoint(fromHex('a3'))).toThrow();
+    expect(() => decodeWsEndpoint(fromHex('a32005'))).toThrow();
   });
 });

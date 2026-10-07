@@ -1,7 +1,7 @@
 /**
  * Network constants and payload codecs for the handful of P2P messages the
  * leaf client speaks: version, verack, ping/pong, sendaddrv2, getaddr,
- * addr, addrv2 (BIP155), p2pmsg/dp2pmsg (opaque passthrough).
+ * addr, addrv2 (BIP155), wsendpoint, p2pmsg/dp2pmsg (opaque passthrough).
  */
 import { Reader, Writer } from '../common/serialize.js';
 
@@ -51,6 +51,17 @@ export const ServiceFlags = {
    * cycle again on reconnect.
    */
   NODE_P2PMSG_V2: 1n << 27n,
+  /**
+   * Serves `getoutkeys`: per-block output keys for light-wallet scanning.
+   * Named so a peer's services decode in full; this SDK does not speak the
+   * messages, which belong to a wallet.
+   */
+  NODE_OUTKEYS: 1n << 28n,
+  /**
+   * Accepts P2P connections over WebSocket. The bit cannot carry a port, so
+   * such a node also sends `wsendpoint` after verack — over clearnet only.
+   */
+  NODE_P2P_WS: 1n << 30n,
 } as const;
 
 export function hasService(services: bigint, flag: bigint): boolean {
@@ -76,6 +87,7 @@ export const MessageType = {
   // command field, and navio-core asserts on the overlong name rather than
   // ignoring it.
   P2PMSGCHAL: 'p2pmsgchal',
+  WSENDPOINT: 'wsendpoint',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -376,4 +388,37 @@ export function decodeAddrV2(payload: Uint8Array): NetAddress[] {
     // else: unsupported network or malformed length for a known one → skip
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// wsendpoint
+// ---------------------------------------------------------------------------
+
+/** navio-core's `MAX_WS_URL_LENGTH`: the longest URL a `wsendpoint` may carry. */
+export const MAX_WS_URL_LENGTH = 256;
+
+export interface WsEndpoint {
+  port: number;
+  /** Public `ws://` / `wss://` URL, or `''` when the listener is at `ws://<peer address>:<port>`. */
+  url: string;
+}
+
+export function encodeWsEndpoint(e: WsEndpoint): Uint8Array {
+  return new Writer().u16(e.port).varString(e.url).finish();
+}
+
+/**
+ * Decode a `wsendpoint` payload. Throws on malformed bytes or an overlong URL,
+ * as navio-core's deserialiser does; returns null for an announcement it
+ * would parse and then ignore — port 0, or a URL that is not `ws://`/`wss://`.
+ */
+export function decodeWsEndpoint(payload: Uint8Array): WsEndpoint | null {
+  const r = new Reader(payload);
+  const port = r.u16();
+  const len = r.compactSize();
+  if (len > MAX_WS_URL_LENGTH) throw new Error(`wsendpoint url too long: ${len}`);
+  const url = new TextDecoder().decode(r.bytes(len));
+  if (port === 0) return null;
+  if (url !== '' && !url.startsWith('ws://') && !url.startsWith('wss://')) return null;
+  return { port, url };
 }

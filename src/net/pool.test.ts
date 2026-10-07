@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { utf8 } from '../common/bytes.js';
-import { MessageType, ServiceFlags, type NetAddress } from './messages.js';
+import { MessageType, ServiceFlags, encodeWsEndpoint, type NetAddress } from './messages.js';
 import { MockNode, MockTransport, type MockNodeOptions } from './mock-transport.js';
 import { PeerPool, normalizeAddress, type PeerPoolOptions } from './pool.js';
 import { parsePeerAddress } from './transport.js';
@@ -235,5 +235,19 @@ describe('IPv6 deprioritisation', () => {
     expect(dials[0]!.startsWith('[')).toBe(true);
     expect(dials.filter((d) => d.startsWith('[')).length).toBe(1);
     expect(dials[1]).toBe('9.9.9.9:1');
+  });
+});
+
+describe('wsendpoint', () => {
+  it("reports a peer's announced WebSocket listener in its PeerInfo", async () => {
+    const net = mockNetwork();
+    const pool = makePool({ seeds: ['10.0.0.5:18444'], targetPeers: 1, transportFactory: net.factory });
+    await pool.start();
+    await until(() => pool.connectedCount === 1);
+    expect(pool.peers()[0]!.wsEndpoint).toBeUndefined();
+    net.live()[0]!.send(MessageType.WSENDPOINT, encodeWsEndpoint({ port: 8355, url: '' }));
+    await until(() => pool.peers()[0]?.wsEndpoint !== undefined);
+    expect(pool.peers()[0]!.wsEndpoint).toBe('ws://10.0.0.5:8355');
+    pool.stop();
   });
 });

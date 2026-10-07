@@ -15,6 +15,7 @@ import {
   decodeAddrV2,
   decodePong,
   decodeVersion,
+  decodeWsEndpoint,
   encodePing,
   encodePong,
   encodeVersion,
@@ -22,7 +23,7 @@ import {
   type NetworkName,
   type VersionMessage,
 } from './messages.js';
-import type { Transport } from './transport.js';
+import { formatHostPort, parsePeerAddress, type Transport } from './transport.js';
 
 export const DEFAULT_USER_AGENT = '/navio-p2pmsg:0.1.0/';
 
@@ -91,6 +92,8 @@ export type PeerEvents = {
   archive: { payload: Uint8Array };
   /** Parsed `addr` / `addrv2` entries (one event per message). */
   addr: NetAddress[];
+  /** The peer announced its WebSocket listener; value is the URL to dial it at. */
+  wsendpoint: string;
   /** A `pong` matching an outstanding ping; value is the round-trip time in ms. */
   pong: number;
   /** Non-fatal problem (bad checksum, unparsable addr, ...). */
@@ -117,6 +120,12 @@ export class Peer extends Emitter<PeerEvents> {
    * undefined means this peer does not archive, or has not spoken yet.
    */
   archiveChallenge: Uint8Array | undefined;
+  /**
+   * Where this peer accepts WebSocket P2P connections, from its `wsendpoint`.
+   * Unauthenticated, like every service advertisement, and only ever about
+   * the peer itself.
+   */
+  wsEndpoint: string | undefined;
 
   private _state: PeerState = 'idle';
   private readonly opts: Required<Omit<PeerOptions, 'now'>> & { now: () => number };
@@ -401,6 +410,9 @@ export class Peer extends Emitter<PeerEvents> {
         // node on one connection and nowhere else.
         if (m.payload.length === 32) this.archiveChallenge = m.payload.slice();
         return;
+      case MessageType.WSENDPOINT:
+        this.onWsEndpoint(m.payload);
+        return;
       case MessageType.P2PMSGS:
         // Response to an archive query we sent. Unsolicited ones are the
         // caller's problem to ignore; the archive client matches them to an
@@ -412,6 +424,16 @@ export class Peer extends Emitter<PeerEvents> {
         // inv, headers, sendcmpct, wtxidrelay, feefilter, ... : not our business.
         return;
     }
+  }
+
+  private onWsEndpoint(payload: Uint8Array): void {
+    const e = decodeWsEndpoint(payload);
+    // Informational, so a bogus announcement is dropped, not held against the
+    // peer — navio-core does the same.
+    if (!e) return;
+    // An empty URL means "at the address you reached me on".
+    this.wsEndpoint = e.url || `ws://${formatHostPort(parsePeerAddress(this.transport.remote, e.port).host, e.port)}`;
+    this.emit('wsendpoint', this.wsEndpoint);
   }
 
   private onVersion(payload: Uint8Array): void {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { toHex, utf8 } from '../common/bytes.js';
 import { encodeMessage } from './codec.js';
-import { MessageType, ServiceFlags, decodePing, decodeVersion, encodeAddr, encodePong } from './messages.js';
+import { MessageType, ServiceFlags, decodePing, decodeVersion, encodeAddr, encodePong, encodeWsEndpoint } from './messages.js';
 import { MockNode, MockTransport, type MockNodeOptions } from './mock-transport.js';
 import { Peer, type PeerOptions } from './peer.js';
 
@@ -50,6 +50,32 @@ describe('Peer', () => {
 
     peer.close();
     expect(peer.closed).toBe(true);
+  });
+
+  it('records a wsendpoint, resolving an empty url against the peer address', async () => {
+    const { peer, node } = setup();
+    await peer.connect();
+    const seen = new Promise<string>((r) => peer.on('wsendpoint', r));
+    node.send(MessageType.WSENDPOINT, encodeWsEndpoint({ port: 8355, url: '' }));
+    expect(await seen).toBe('ws://127.0.0.1:8355');
+    expect(peer.wsEndpoint).toBe('ws://127.0.0.1:8355');
+    // A later announcement with a public URL replaces it.
+    node.send(MessageType.WSENDPOINT, encodeWsEndpoint({ port: 443, url: 'wss://node.example/p2p' }));
+    await new Promise<string>((r) => peer.on('wsendpoint', r));
+    expect(peer.wsEndpoint).toBe('wss://node.example/p2p');
+    peer.close();
+  });
+
+  it('brackets an IPv6 peer address, and ignores an invalid wsendpoint', async () => {
+    const [client, server] = MockTransport.pair('[2001:db8::7]:18444', 'node');
+    const node = new MockNode(server, { network: 'regtest' });
+    const peer = new Peer(client, { network: 'regtest', pingIntervalMs: 0 });
+    await peer.connect();
+    node.send(MessageType.WSENDPOINT, encodeWsEndpoint({ port: 0, url: '' }));
+    node.send(MessageType.WSENDPOINT, encodeWsEndpoint({ port: 8355, url: '' }));
+    await new Promise<string>((r) => peer.on('wsendpoint', r));
+    expect(peer.wsEndpoint).toBe('ws://[2001:db8::7]:8355');
+    peer.close();
   });
 
   it('proceeds with an old-protocol peer (no sendaddrv2 for < 70016)', async () => {

@@ -10,16 +10,19 @@ npm test         # 566 unit tests, ~3 min on an idle machine
 npm run test:int # 62 integration tests against a real naviod, ~11 min
 ```
 
-Both must be green on the commit you intend to tag.
+Both must be green on the commit you intend to tag. CI
+(`.github/workflows/ci.yml`) runs typecheck, build and the unit suite on every
+pull request and push to `main`, on Node 20, 22 and 24; it cannot run the
+integration suite, which needs `naviod`, so that one is still yours to run.
 
 The tests are deliberately not in the publish gate. They are dominated by
 BLS12-381 operations, so on a workstation that is also compiling a node they
 slow by an order of magnitude — a group test that takes 5 seconds idle has been
 measured at over 60 — and vitest's own worker RPC starts timing out. Gating an
 upload on that turns a deterministic check into a coin flip about what else the
-machine happens to be doing, and the failures land on whichever test was
-waiting rather than on anything real. Tests belong on a machine that is only
-running tests.
+machine happens to be doing, and the failures land on whichever test was waiting
+rather than on anything real. Tests belong on a machine that is only running
+tests.
 
 ## Running the integration suite
 
